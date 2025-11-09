@@ -164,6 +164,7 @@ interface AppContextType {
   getUserRoleInProject: (projectId: string) => UserRole;
   canViewAllProjectTasks: (projectId: string) => boolean;
   canEditTask: (task: Task) => boolean;
+  canDeleteTask: (task: Task) => boolean;
   canCreateTask: (projectId?: string) => boolean;
   canEditProject: (projectId: string) => boolean;
   canDeleteProject: (projectId: string) => boolean;
@@ -1134,6 +1135,36 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   }, [currentUser, getUserRoleInProject]);
 
   /**
+   * Check if user can delete task
+   * Owner, Admin/Collaborator - can delete any task in project
+   * Member - can only delete tasks they created OR are assigned to
+   * Viewer - cannot delete
+   */
+  const canDeleteTask = React.useCallback((task: Task): boolean => {
+    if (!currentUser) return false;
+    
+    // Personal tasks can be deleted by the owner
+    if (!task.projectId) {
+      return task.userId === currentUser.id;
+    }
+    
+    const role = getUserRoleInProject(task.projectId);
+    
+    // Owner and Collaborator can delete any task in the project
+    if (role === 'owner' || role === 'collaborator') {
+      return true;
+    }
+    
+    // Member can delete tasks they created OR are assigned to
+    if (role === 'member') {
+      return task.userId === currentUser.id || task.assigneeId === currentUser.id;
+    }
+    
+    // Viewer cannot delete
+    return false;
+  }, [currentUser, getUserRoleInProject]);
+
+  /**
    * Check if user can create task in project
    * Owner, Admin/Collaborator, Member - can create tasks
    * Viewer - cannot create
@@ -1206,6 +1237,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     getUserRoleInProject,
     canViewAllProjectTasks,
     canEditTask,
+    canDeleteTask,
     canCreateTask,
     canEditProject,
     canDeleteProject,

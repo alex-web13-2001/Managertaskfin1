@@ -321,9 +321,16 @@ export function ProjectMembersModal({
         link: invitation.inviteLink,
       };
       
+      // Update invitations list immediately
       setInvitations([newInvitation, ...invitations]);
+      
+      // Clear input fields
       setInviteEmail('');
       setInviteRole('member');
+      
+      // Refresh invitation list from server to ensure sync
+      await fetchInvitations();
+      
       toast.success('Приглашение отправлено! Пользователь получит уведомление на email.');
       setActiveTab('invitations');
     } catch (error) {

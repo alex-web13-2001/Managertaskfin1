@@ -1124,13 +1124,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     
     const role = getUserRoleInProject(task.projectId);
     
+    // Owner can edit ANY task in their project, regardless of who created it
+    // Collaborator can also edit any task
     if (role === 'owner' || role === 'collaborator') {
       return true;
     }
     
     if (role === 'member') {
       // Member can edit task if they are assigned to it OR created it
-      return task.assigneeId === currentUser.id || task.createdBy === currentUser.id;
+      return task.assigneeId === currentUser.id || task.userId === currentUser.id;
     }
     
     return false; // Viewer cannot edit

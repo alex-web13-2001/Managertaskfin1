@@ -68,22 +68,32 @@ echo ""
 
 # Check local vs remote commits
 echo -e "${YELLOW}[4/10] Checking for updates from GitHub...${NC}"
-git fetch origin -q
-LOCAL_COMMIT=$(git rev-parse HEAD)
-REMOTE_COMMIT=$(git rev-parse origin/$CURRENT_BRANCH)
+if git fetch origin -q 2>/dev/null; then
+    LOCAL_COMMIT=$(git rev-parse HEAD)
+    REMOTE_COMMIT=$(git rev-parse origin/$CURRENT_BRANCH 2>/dev/null || echo "")
 
-echo "Local commit:  $LOCAL_COMMIT"
-echo "Remote commit: $REMOTE_COMMIT"
+    if [ -z "$REMOTE_COMMIT" ]; then
+        print_status 1 "WARNING: Cannot access remote branch"
+        echo "This may be normal in CI/CD environments"
+    else
+        echo "Local commit:  $LOCAL_COMMIT"
+        echo "Remote commit: $REMOTE_COMMIT"
 
-if [ "$LOCAL_COMMIT" = "$REMOTE_COMMIT" ]; then
-    print_status 0 "Local and remote are in sync"
+        if [ "$LOCAL_COMMIT" = "$REMOTE_COMMIT" ]; then
+            print_status 0 "Local and remote are in sync"
+        else
+            print_status 1 "WARNING: Local and remote differ"
+            echo ""
+            echo "Commits on remote not on local:"
+            git log HEAD..origin/$CURRENT_BRANCH --oneline 2>/dev/null || echo "Cannot display commits"
+            echo ""
+            echo -e "${YELLOW}Run 'git pull origin $CURRENT_BRANCH' to update${NC}"
+        fi
+    fi
 else
-    print_status 1 "WARNING: Local and remote differ"
-    echo ""
-    echo "Commits on remote not on local:"
-    git log HEAD..origin/$CURRENT_BRANCH --oneline
-    echo ""
-    echo -e "${YELLOW}Run 'git pull origin $CURRENT_BRANCH' to update${NC}"
+    print_status 1 "WARNING: Cannot fetch from remote"
+    echo "This is normal in CI/CD environments"
+    echo "In production, ensure you have internet access and credentials"
 fi
 echo ""
 
@@ -206,7 +216,11 @@ echo -e "${BLUE}  Summary / Резюме${NC}"
 echo -e "${BLUE}=========================================${NC}"
 echo ""
 
-if [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
+# Check if we could compare with remote
+REMOTE_COMMIT=$(git rev-parse origin/$CURRENT_BRANCH 2>/dev/null || echo "")
+LOCAL_COMMIT=$(git rev-parse HEAD 2>/dev/null || echo "")
+
+if [ ! -z "$REMOTE_COMMIT" ] && [ ! -z "$LOCAL_COMMIT" ] && [ "$LOCAL_COMMIT" != "$REMOTE_COMMIT" ]; then
     echo -e "${RED}⚠ ACTION REQUIRED: Pull latest changes${NC}"
     echo -e "Run: ${YELLOW}git pull origin $CURRENT_BRANCH${NC}"
     echo ""

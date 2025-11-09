@@ -21,6 +21,31 @@ const clearAuthToken = (): void => {
   localStorage.removeItem(TOKEN_KEY);
 };
 
+/**
+ * Get user ID from JWT token
+ */
+const getUserIdFromToken = (): string | null => {
+  const token = getAuthToken();
+  if (!token) return null;
+  
+  try {
+    // Decode JWT token (without verifying - verification happens on server)
+    const base64Url = token.split('.')[1];
+    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+    const jsonPayload = decodeURIComponent(
+      atob(base64)
+        .split('')
+        .map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+        .join('')
+    );
+    const payload = JSON.parse(jsonPayload);
+    return payload.sub || null;
+  } catch (error) {
+    console.error('Failed to decode token:', error);
+    return null;
+  }
+};
+
 // ========== AUTH API ==========
 
 export const authAPI = {
@@ -218,9 +243,12 @@ export const tasksAPI = {
   getAll: async () => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
 
-    // Tasks are stored in KV store
-    const response = await fetch(`${API_BASE_URL}/api/kv/tasks`, {
+    // Tasks are stored in user-scoped KV store
+    const response = await fetch(`${API_BASE_URL}/api/kv/tasks:${userId}`, {
       headers: {
         'Authorization': `Bearer ${token}`,
       },
@@ -237,6 +265,9 @@ export const tasksAPI = {
   create: async (taskData: any) => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
 
     // Get existing tasks
     const tasks = await tasksAPI.getAll();
@@ -251,7 +282,7 @@ export const tasksAPI = {
 
     // Save updated tasks
     tasks.push(newTask);
-    await fetch(`${API_BASE_URL}/api/kv/tasks`, {
+    await fetch(`${API_BASE_URL}/api/kv/tasks:${userId}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -266,6 +297,9 @@ export const tasksAPI = {
   update: async (taskId: string, updates: any) => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
 
     // Get existing tasks
     const tasks = await tasksAPI.getAll();
@@ -283,7 +317,7 @@ export const tasksAPI = {
     };
 
     // Save updated tasks
-    await fetch(`${API_BASE_URL}/api/kv/tasks`, {
+    await fetch(`${API_BASE_URL}/api/kv/tasks:${userId}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -298,6 +332,9 @@ export const tasksAPI = {
   delete: async (taskId: string) => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
 
     // Get existing tasks
     const tasks = await tasksAPI.getAll();
@@ -306,7 +343,7 @@ export const tasksAPI = {
     const updatedTasks = tasks.filter((t: any) => t.id !== taskId);
 
     // Save updated tasks
-    await fetch(`${API_BASE_URL}/api/kv/tasks`, {
+    await fetch(`${API_BASE_URL}/api/kv/tasks:${userId}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -356,8 +393,11 @@ export const projectsAPI = {
   getAll: async () => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
 
-    const response = await fetch(`${API_BASE_URL}/api/kv/projects`, {
+    const response = await fetch(`${API_BASE_URL}/api/kv/projects:${userId}`, {
       headers: {
         'Authorization': `Bearer ${token}`,
       },
@@ -374,6 +414,9 @@ export const projectsAPI = {
   create: async (projectData: any) => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
 
     const projects = await projectsAPI.getAll();
     
@@ -385,7 +428,7 @@ export const projectsAPI = {
     };
 
     projects.push(newProject);
-    await fetch(`${API_BASE_URL}/api/kv/projects`, {
+    await fetch(`${API_BASE_URL}/api/kv/projects:${userId}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -400,6 +443,9 @@ export const projectsAPI = {
   update: async (projectId: string, updates: any) => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
 
     const projects = await projectsAPI.getAll();
     const index = projects.findIndex((p: any) => p.id === projectId);
@@ -414,7 +460,7 @@ export const projectsAPI = {
       updatedAt: new Date().toISOString(),
     };
 
-    await fetch(`${API_BASE_URL}/api/kv/projects`, {
+    await fetch(`${API_BASE_URL}/api/kv/projects:${userId}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -437,11 +483,14 @@ export const projectsAPI = {
   delete: async (projectId: string) => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
 
     const projects = await projectsAPI.getAll();
     const updatedProjects = projects.filter((p: any) => p.id !== projectId);
 
-    await fetch(`${API_BASE_URL}/api/kv/projects`, {
+    await fetch(`${API_BASE_URL}/api/kv/projects:${userId}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -470,8 +519,11 @@ export const invitationsAPI = {
   getMyInvitations: async () => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
 
-    const response = await fetch(`${API_BASE_URL}/api/kv/invitations`, {
+    const response = await fetch(`${API_BASE_URL}/api/kv/invitations:${userId}`, {
       headers: {
         'Authorization': `Bearer ${token}`,
       },
@@ -498,8 +550,11 @@ export const teamAPI = {
   getMembers: async () => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
 
-    const response = await fetch(`${API_BASE_URL}/api/kv/members`, {
+    const response = await fetch(`${API_BASE_URL}/api/kv/members:${userId}`, {
       headers: {
         'Authorization': `Bearer ${token}`,
       },
@@ -534,8 +589,11 @@ export const userSettingsAPI = {
   getCustomColumns: async () => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
 
-    const response = await fetch(`${API_BASE_URL}/api/kv/custom_columns`, {
+    const response = await fetch(`${API_BASE_URL}/api/kv/custom_columns:${userId}`, {
       headers: {
         'Authorization': `Bearer ${token}`,
       },
@@ -552,8 +610,11 @@ export const userSettingsAPI = {
   saveCustomColumns: async (customColumns: Array<{ id: string; title: string; color: string }>) => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
 
-    await fetch(`${API_BASE_URL}/api/kv/custom_columns`, {
+    await fetch(`${API_BASE_URL}/api/kv/custom_columns:${userId}`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

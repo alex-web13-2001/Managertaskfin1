@@ -3,6 +3,30 @@ import { tasksAPI, projectsAPI, authAPI, teamAPI, userSettingsAPI, supabase, get
 // Removed: import { projectId } from '../utils/supabase/info';
 import { toast } from 'sonner@2.0.3';
 
+/**
+ * Helper function to get user ID from JWT token
+ */
+const getUserIdFromToken = (): string | null => {
+  const token = getAuthToken();
+  if (!token) return null;
+  
+  try {
+    const base64Url = token.split('.')[1];
+    const base64 = base64Url.replace(/-/g, '+').replace(/_/g, '/');
+    const jsonPayload = decodeURIComponent(
+      atob(base64)
+        .split('')
+        .map(c => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+        .join('')
+    );
+    const payload = JSON.parse(jsonPayload);
+    return payload.sub || null;
+  } catch (error) {
+    console.error('Failed to decode token:', error);
+    return null;
+  }
+};
+
 export interface TaskAttachment {
   id: string;
   name: string;
@@ -421,8 +445,14 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       
+      const userId = getUserIdFromToken();
+      if (!userId) {
+        console.error('❌ Не удалось получить userId из токена');
+        return;
+      }
+      
       const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
-      const response = await fetch(`${API_BASE_URL}/api/kv/categories`, {
+      const response = await fetch(`${API_BASE_URL}/api/kv/categories:${userId}`, {
         headers: {
           'Authorization': `Bearer ${token}`,
         },
@@ -450,10 +480,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         throw new Error('Необходима авторизация');
       }
       
+      const userId = getUserIdFromToken();
+      if (!userId) {
+        throw new Error('Не удалось получить userId из токена');
+      }
+      
       const newCategory = {
         ...categoryData,
         id: categoryData.id || `cat_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        userId: currentUser?.id || '',
+        userId: currentUser?.id || userId,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -461,7 +496,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
       const updatedCategories = [...categories, newCategory];
       
-      const response = await fetch(`${API_BASE_URL}/api/kv/categories`, {
+      const response = await fetch(`${API_BASE_URL}/api/kv/categories:${userId}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -493,6 +528,11 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         throw new Error('Необходима авторизация');
       }
       
+      const userId = getUserIdFromToken();
+      if (!userId) {
+        throw new Error('Не удалось получить userId из токена');
+      }
+      
       const updatedCategories = categories.map(c => 
         c.id === categoryId 
           ? { ...c, ...updates, updatedAt: new Date().toISOString() }
@@ -500,7 +540,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       );
       
       const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
-      const response = await fetch(`${API_BASE_URL}/api/kv/categories`, {
+      const response = await fetch(`${API_BASE_URL}/api/kv/categories:${userId}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -533,10 +573,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         throw new Error('Необходима авторизация');
       }
       
+      const userId = getUserIdFromToken();
+      if (!userId) {
+        throw new Error('Не удалось получить userId из токена');
+      }
+      
       const updatedCategories = categories.filter(c => c.id !== categoryId);
       
       const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
-      const response = await fetch(`${API_BASE_URL}/api/kv/categories`, {
+      const response = await fetch(`${API_BASE_URL}/api/kv/categories:${userId}`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

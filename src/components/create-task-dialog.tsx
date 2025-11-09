@@ -62,15 +62,16 @@ export function CreateTaskDialog({
     }
     
     if (!selectedProject) {
-      return [];
+      return categories;
     }
     
     // Check if project has availableCategories defined
     const projectAvailableCategories = (selectedProject as any).availableCategories;
     
     if (!projectAvailableCategories || !Array.isArray(projectAvailableCategories) || projectAvailableCategories.length === 0) {
-      // If no categories specified for the project, return empty array (no categories available)
-      return [];
+      // If no categories are assigned to the project, allow all categories
+      // This allows users to assign any task to themselves in the project
+      return categories;
     }
     
     // Filter to only show categories available in this project
@@ -183,36 +184,22 @@ export function CreateTaskDialog({
                 value={category} 
                 onValueChange={setCategory} 
                 required
-                disabled={project !== 'personal' && project !== '' && availableCategories.length === 0}
               >
                 <SelectTrigger>
                   <SelectValue placeholder="Выберите категорию" />
                 </SelectTrigger>
                 <SelectContent>
-                  {availableCategories.length === 0 && project !== 'personal' && project !== '' ? (
-                    <SelectItem value="none" disabled>
-                      В проекте нет доступных категорий
+                  <SelectItem value="none">Без категории</SelectItem>
+                  {availableCategories.map((cat) => (
+                    <SelectItem key={cat.id} value={cat.id}>
+                      <div className="flex items-center gap-2">
+                        <div className={`w-2 h-2 rounded-full ${cat.color}`} />
+                        {cat.name}
+                      </div>
                     </SelectItem>
-                  ) : (
-                    <>
-                      <SelectItem value="none">Без категории</SelectItem>
-                      {availableCategories.map((cat) => (
-                        <SelectItem key={cat.id} value={cat.id}>
-                          <div className="flex items-center gap-2">
-                            <div className={`w-2 h-2 rounded-full ${cat.color}`} />
-                            {cat.name}
-                          </div>
-                        </SelectItem>
-                      ))}
-                    </>
-                  )}
+                  ))}
                 </SelectContent>
               </Select>
-              {project !== 'personal' && project !== '' && availableCategories.length === 0 && (
-                <p className="text-xs text-amber-600">
-                  В настройках проекта не привязаны категории. Добавьте категории к проекту, чтобы иметь возможность их выбрать.
-                </p>
-              )}
             </div>
           </div>
 

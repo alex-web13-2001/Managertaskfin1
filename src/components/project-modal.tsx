@@ -153,6 +153,7 @@ export function ProjectModal({
       onOpenChange(false);
     } catch (error) {
       console.error('Project save error:', error);
+      toast.error(error instanceof Error ? error.message : 'Ошибка сохранения проекта');
     } finally {
       setIsLoading(false);
     }

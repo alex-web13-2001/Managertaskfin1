@@ -139,6 +139,7 @@ export function TaskModal({
     deleteTask,
     uploadTaskAttachment,
     deleteTaskAttachment,
+    canDeleteTask,
   } = useApp();
   const [mode, setMode] = React.useState<TaskModalMode>(initialMode);
   const [isLoading, setIsLoading] = React.useState(false);
@@ -167,21 +168,11 @@ export function TaskModal({
   // Загрузка данных задачи для режима просмотра/редактирования
   const existingTask = taskId && !isCreateMode ? tasks.find(t => t.id === taskId) : null;
   
-  // Проверка прав на удаление задачи
-  const canDeleteTask = React.useMemo(() => {
-    if (!existingTask || !currentUser) return false;
-    
-    // Создатель задачи может удалить
-    if (existingTask.userId === currentUser.id) return true;
-    
-    // Владелец проекта может удалить
-    if (existingTask.projectId) {
-      const project = projects.find(p => p.id === existingTask.projectId);
-      if (project?.userId === currentUser.id) return true;
-    }
-    
-    return false;
-  }, [existingTask, currentUser, projects]);
+  // Проверка прав на удаление задачи с использованием context helper
+  const canDelete = React.useMemo(() => {
+    if (!existingTask) return false;
+    return canDeleteTask(existingTask);
+  }, [existingTask, canDeleteTask]);
 
   // Form state
   const [title, setTitle] = React.useState(existingTask?.title || '');
@@ -828,7 +819,7 @@ export function TaskModal({
                   {isViewMode && 'Просмотр задачи'}
                 </DialogDescription>
               </div>
-              {isEditMode && canDeleteTask && (
+              {isEditMode && canDelete && (
                 <Button
                   variant="ghost"
                   size="icon"
@@ -1054,7 +1045,7 @@ export function TaskModal({
                 <Button variant="outline" className="flex-1" onClick={() => onOpenChange(false)}>
                   Закрыть
                 </Button>
-                {canDeleteTask && (
+                {canDelete && (
                   <Button 
                     variant="outline" 
                     className="text-red-600 hover:text-red-700 hover:bg-red-50 border-red-200"

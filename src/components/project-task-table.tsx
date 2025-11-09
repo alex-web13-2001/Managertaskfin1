@@ -69,7 +69,7 @@ const statusLabels = {
 // Categories are now loaded from the app context
 
 export function ProjectTaskTable({ projectId, searchQuery, filters, onTaskClick }: ProjectTaskTableProps) {
-  const { tasks, updateTask, deleteTask, teamMembers, currentUser, canEditTask, categories } = useApp();
+  const { tasks, updateTask, deleteTask, teamMembers, currentUser, canEditTask, canDeleteTask, categories } = useApp();
 
   // Filter tasks for this project
   const filteredTasks = React.useMemo(() => {
@@ -205,6 +205,7 @@ export function ProjectTaskTable({ projectId, searchQuery, filters, onTaskClick 
               const category = categories.find((c) => c.id === task.categoryId);
               const overdue = isOverdue(task.deadline);
               const userCanEdit = canEditTask(task);
+              const userCanDelete = canDeleteTask(task);
 
               return (
                 <TableRow
@@ -324,7 +325,7 @@ export function ProjectTaskTable({ projectId, searchQuery, filters, onTaskClick 
                         <DropdownMenuItem onClick={() => onTaskClick(task.id)}>
                           Открыть
                         </DropdownMenuItem>
-                        {userCanEdit && (
+                        {userCanDelete && (
                           <>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem

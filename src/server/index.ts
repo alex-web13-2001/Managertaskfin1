@@ -1,0 +1,355 @@
+import express, { Request, Response, NextFunction } from 'express';
+import cors from 'cors';
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
+import prisma from '../lib/prisma';
+import { hashPassword, comparePassword, generateToken, verifyToken, JwtPayload } from '../lib/auth';
+import * as kv from './kv_store';
+
+const app = express();
+const PORT = process.env.PORT || 3001;
+
+// Create uploads directory if it doesn't exist
+const uploadsDir = path.join(process.cwd(), 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Middleware
+app.use(cors());
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+// Serve static files from uploads directory
+app.use('/uploads', express.static(uploadsDir));
+
+// Configure multer for file uploads
+const storage = multer.diskStorage({
+  destination: (_req, _file, cb) => {
+    cb(null, uploadsDir);
+  },
+  filename: (_req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    cb(null, uniqueSuffix + '-' + file.originalname);
+  },
+});
+
+const upload = multer({
+  storage,
+  limits: {
+    fileSize: 50 * 1024 * 1024, // 50MB limit
+  },
+});
+
+// ========== AUTH MIDDLEWARE ==========
+
+interface AuthRequest extends Request {
+  user?: JwtPayload;
+}
+
+async function authenticate(req: AuthRequest, res: Response, next: NextFunction) {
+  try {
+    const authHeader = req.headers.authorization;
+    
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Missing or invalid authorization header' });
+    }
+
+    const token = authHeader.substring(7); // Remove 'Bearer ' prefix
+    const payload = verifyToken(token);
+    
+    req.user = payload;
+    next();
+  } catch (error) {
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+}
+
+// ========== HEALTH CHECK ==========
+
+app.get('/health', (_req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// ========== AUTH ENDPOINTS ==========
+
+/**
+ * POST /api/auth/signup
+ * Register a new user
+ */
+app.post('/api/auth/signup', async (req: Request, res: Response) => {
+  try {
+    const { email, password, name } = req.body;
+
+    if (!email || !password || !name) {
+      return res.status(400).json({ error: 'Email, password, and name are required' });
+    }
+
+    // Check if user already exists
+    const existingUser = await prisma.user.findUnique({ where: { email } });
+    if (existingUser) {
+      return res.status(400).json({ error: 'User with this email already exists' });
+    }
+
+    // Hash password and create user
+    const hashedPassword = await hashPassword(password);
+    const user = await prisma.user.create({
+      data: {
+        email,
+        password: hashedPassword,
+        name,
+      },
+    });
+
+    // Generate token
+    const token = generateToken(user.id, user.email);
+
+    res.status(201).json({
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        avatarUrl: user.avatarUrl,
+      },
+      token,
+    });
+  } catch (error: any) {
+    console.error('Signup error:', error);
+    res.status(500).json({ error: 'Failed to create user' });
+  }
+});
+
+/**
+ * POST /api/auth/signin
+ * Sign in a user
+ */
+app.post('/api/auth/signin', async (req: Request, res: Response) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({ error: 'Email and password are required' });
+    }
+
+    // Find user
+    const user = await prisma.user.findUnique({ where: { email } });
+    if (!user) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Verify password
+    const isValid = await comparePassword(password, user.password);
+    if (!isValid) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Generate token
+    const token = generateToken(user.id, user.email);
+
+    res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        avatarUrl: user.avatarUrl,
+      },
+      token,
+    });
+  } catch (error: any) {
+    console.error('Signin error:', error);
+    res.status(500).json({ error: 'Failed to sign in' });
+  }
+});
+
+/**
+ * GET /api/auth/me
+ * Get current user
+ */
+app.get('/api/auth/me', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.sub;
+    
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        avatarUrl: user.avatarUrl,
+      },
+    });
+  } catch (error: any) {
+    console.error('Get user error:', error);
+    res.status(500).json({ error: 'Failed to get user' });
+  }
+});
+
+// ========== FILE UPLOAD ENDPOINTS ==========
+
+/**
+ * POST /api/upload-avatar
+ * Upload user avatar
+ */
+app.post('/api/upload-avatar', authenticate, upload.single('avatar'), async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const userId = req.user!.sub;
+    const avatarUrl = `/uploads/${req.file.filename}`;
+
+    // Update user avatar
+    const user = await prisma.user.update({
+      where: { id: userId },
+      data: { avatarUrl },
+    });
+
+    res.json({
+      avatarUrl: user.avatarUrl,
+      message: 'Avatar uploaded successfully',
+    });
+  } catch (error: any) {
+    console.error('Upload avatar error:', error);
+    res.status(500).json({ error: 'Failed to upload avatar' });
+  }
+});
+
+/**
+ * POST /api/upload-attachment
+ * Upload task attachment
+ */
+app.post('/api/upload-attachment', authenticate, upload.single('file'), async (req: AuthRequest, res: Response) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ error: 'No file uploaded' });
+    }
+
+    const { taskId } = req.body;
+    if (!taskId) {
+      return res.status(400).json({ error: 'Task ID is required' });
+    }
+
+    const fileUrl = `/uploads/${req.file.filename}`;
+    const attachmentId = `attachment_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    // Store attachment metadata in KV store
+    const attachment = {
+      id: attachmentId,
+      taskId,
+      filename: req.file.originalname,
+      url: fileUrl,
+      size: req.file.size,
+      mimeType: req.file.mimetype,
+      uploadedAt: new Date().toISOString(),
+    };
+
+    // Get existing attachments for this task
+    const taskAttachmentsKey = `task_attachments:${taskId}`;
+    const existingAttachments = (await kv.get(taskAttachmentsKey)) || [];
+    existingAttachments.push(attachment);
+    await kv.set(taskAttachmentsKey, existingAttachments);
+
+    res.json({
+      attachment,
+      message: 'Attachment uploaded successfully',
+    });
+  } catch (error: any) {
+    console.error('Upload attachment error:', error);
+    res.status(500).json({ error: 'Failed to upload attachment' });
+  }
+});
+
+// ========== KV STORE ENDPOINTS ==========
+
+/**
+ * GET /api/kv/:key
+ * Get value by key
+ */
+app.get('/api/kv/:key', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { key } = req.params;
+    const value = await kv.get(key);
+    
+    res.json({ key, value });
+  } catch (error: any) {
+    console.error('KV get error:', error);
+    res.status(500).json({ error: 'Failed to get value' });
+  }
+});
+
+/**
+ * POST /api/kv/:key
+ * Set value by key
+ */
+app.post('/api/kv/:key', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { key } = req.params;
+    const { value } = req.body;
+    
+    await kv.set(key, value);
+    
+    res.json({ key, value, message: 'Value set successfully' });
+  } catch (error: any) {
+    console.error('KV set error:', error);
+    res.status(500).json({ error: 'Failed to set value' });
+  }
+});
+
+/**
+ * DELETE /api/kv/:key
+ * Delete value by key
+ */
+app.delete('/api/kv/:key', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { key } = req.params;
+    await kv.del(key);
+    
+    res.json({ message: 'Value deleted successfully' });
+  } catch (error: any) {
+    console.error('KV delete error:', error);
+    res.status(500).json({ error: 'Failed to delete value' });
+  }
+});
+
+/**
+ * GET /api/kv-prefix/:prefix
+ * Get all values with keys starting with prefix
+ */
+app.get('/api/kv-prefix/:prefix', authenticate, async (req: Request, res: Response) => {
+  try {
+    const { prefix } = req.params;
+    const values = await kv.getByPrefix(prefix);
+    
+    res.json({ prefix, values });
+  } catch (error: any) {
+    console.error('KV get by prefix error:', error);
+    res.status(500).json({ error: 'Failed to get values' });
+  }
+});
+
+// ========== ERROR HANDLER ==========
+
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+  console.error('Server error:', err);
+  res.status(500).json({ error: 'Internal server error' });
+});
+
+// ========== START SERVER ==========
+
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on http://localhost:${PORT}`);
+    console.log(`📁 Serving uploads from: ${uploadsDir}`);
+  });
+}
+
+export default app;

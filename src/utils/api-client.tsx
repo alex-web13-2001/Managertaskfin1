@@ -259,7 +259,32 @@ export const tasksAPI = {
     }
 
     const data = await response.json();
-    return data.value || [];
+    const tasks = data.value || [];
+    
+    // Load attachments for each task
+    const tasksWithAttachments = await Promise.all(
+      tasks.map(async (task: any) => {
+        try {
+          const attachmentsResponse = await fetch(`${API_BASE_URL}/api/kv/task_attachments:${task.id}`, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+            },
+          });
+          
+          if (attachmentsResponse.ok) {
+            const attachmentsData = await attachmentsResponse.json();
+            const attachments = attachmentsData.value || [];
+            return { ...task, attachments };
+          }
+        } catch (error) {
+          console.error(`Failed to load attachments for task ${task.id}:`, error);
+        }
+        
+        return task;
+      })
+    );
+    
+    return tasksWithAttachments;
   },
 
   create: async (taskData: any) => {

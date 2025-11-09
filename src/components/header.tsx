@@ -16,6 +16,7 @@ import { invitationsAPI, getAuthToken } from '../utils/supabase/client';
 import { toast } from 'sonner@2.0.3';
 import { RealtimeIndicator } from './realtime-indicator';
 import { Logo } from './logo';
+import { InvitationsModal } from './invitations-modal';
 
 type HeaderProps = {
   onCreateTask: () => void;
@@ -26,7 +27,7 @@ type HeaderProps = {
 export function Header({ onCreateTask, onNavigate, onLogout }: HeaderProps) {
   const { currentUser, refreshData, isRealtimeConnected } = useApp();
   const [pendingInvitations, setPendingInvitations] = React.useState<any[]>([]);
-  const [loadingInvitations, setLoadingInvitations] = React.useState(false);
+  const [isInvitationsModalOpen, setIsInvitationsModalOpen] = React.useState(false);
 
   const getInitials = (name?: string) => {
     if (!name) return 'U';
@@ -63,19 +64,9 @@ export function Header({ onCreateTask, onNavigate, onLogout }: HeaderProps) {
     }
   }, [currentUser, fetchInvitations]);
 
-  const handleAcceptInvitation = async (invitation: any, projectId: string) => {
-    try {
-      setLoadingInvitations(true);
-      await invitationsAPI.acceptInvitation(projectId, invitation.id);
-      toast.success('Приглашение принято! Проект добавлен.');
-      await fetchInvitations();
-      await refreshData(); // Refresh projects list
-    } catch (error: any) {
-      console.error('Failed to accept invitation:', error);
-      toast.error(error.message || 'Не удалось принять приглашение');
-    } finally {
-      setLoadingInvitations(false);
-    }
+  const handleInvitationAccepted = async () => {
+    await fetchInvitations();
+    await refreshData(); // Refresh projects list
   };
 
   return (
@@ -106,53 +97,19 @@ export function Header({ onCreateTask, onNavigate, onLogout }: HeaderProps) {
         </Button>
 
         {/* Уведомления о приглашениях */}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="ghost" size="icon" className="relative">
-              <Bell className="w-5 h-5" />
-              {pendingInvitations.length > 0 && (
-                <Badge className="absolute -top-1 -right-1 h-5 w-5 flex items-center justify-center p-0 bg-red-500 text-white text-xs">
-                  {pendingInvitations.length}
-                </Badge>
-              )}
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end" className="w-80">
-            <div className="p-2 border-b">
-              <p className="text-sm">Приглашения в проекты ({pendingInvitations.length})</p>
-            </div>
-            {pendingInvitations.length === 0 ? (
-              <div className="p-4 text-center text-sm text-gray-500">
-                Нет новых приглашений
-              </div>
-            ) : (
-              pendingInvitations.map((invitation: any) => {
-                const roleLabels: Record<string, string> = {
-                  owner: 'Владелец',
-                  admin: 'Администратор',
-                  collaborator: 'Участник с правами',
-                  member: 'Участник',
-                  viewer: 'Наблюдатель',
-                };
-                
-                return (
-                  <div key={invitation.id} className="p-3 border-b last:border-0">
-                    <p className="text-sm mb-1">Проект: <strong>{invitation.projectName || 'Без названия'}</strong></p>
-                    <p className="text-xs text-gray-500 mb-2">Роль: {roleLabels[invitation.role] || invitation.role}</p>
-                    <Button
-                      size="sm"
-                      className="w-full bg-purple-600 hover:bg-purple-700"
-                      onClick={() => handleAcceptInvitation(invitation, invitation.projectId)}
-                      disabled={loadingInvitations}
-                    >
-                      {loadingInvitations ? 'Обработка...' : 'Принять приглашение'}
-                    </Button>
-                  </div>
-                );
-              })
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
+        <Button 
+          variant="ghost" 
+          size="icon" 
+          className="relative"
+          onClick={() => setIsInvitationsModalOpen(true)}
+        >
+          <Bell className="w-5 h-5" />
+          {pendingInvitations.length > 0 && (
+            <Badge className="absolute -top-1 -right-1 h-5 w-5 flex items-center justify-center p-0 bg-red-500 text-white text-xs">
+              {pendingInvitations.length}
+            </Badge>
+          )}
+        </Button>
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -190,6 +147,13 @@ export function Header({ onCreateTask, onNavigate, onLogout }: HeaderProps) {
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
+      
+      {/* Invitations Modal */}
+      <InvitationsModal
+        open={isInvitationsModalOpen}
+        onOpenChange={setIsInvitationsModalOpen}
+        onInvitationAccepted={handleInvitationAccepted}
+      />
     </header>
   );
 }

@@ -302,49 +302,28 @@ export function ProjectMembersModal({
 
     try {
       setIsLoading(true);
-      const accessToken = await getAuthToken();
       
-      if (!accessToken) {
-        console.error('No access token found');
-        toast.error('Необходима авторизация. Пожалуйста, войдите в систему заново.');
-        return;
-      }
-
       console.log('Sending invitation for:', inviteEmail, 'role:', inviteRole);
       
-      // Fetch current projects
-      const projects = await projectsAPI.getAll();
-      const projectIndex = projects.findIndex((p: any) => p.id === prjId);
+      // Send invitation using new API
+      const invitation = await projectsAPI.sendInvitation(prjId, inviteEmail, inviteRole);
       
-      if (projectIndex === -1) {
-        toast.error('Проект не найден');
-        return;
-      }
+      console.log('Invitation created:', invitation);
       
-      const project = projects[projectIndex];
-      
-      // Create new invitation
+      // Transform to match UI format
       const newInvitation: Invitation = {
-        id: `inv-${Date.now()}`,
-        email: inviteEmail,
-        role: inviteRole,
-        status: 'pending',
-        sentDate: new Date().toISOString(),
-        link: `${window.location.origin}/invite/${prjId}/${Date.now()}`,
+        id: invitation.id,
+        email: invitation.invitedEmail,
+        role: invitation.role,
+        status: invitation.status,
+        sentDate: invitation.sentDate,
+        link: invitation.inviteLink,
       };
       
-      // Update project with new invitation
-      project.invitations = [...(project.invitations || []), newInvitation];
-      projects[projectIndex] = project;
-      
-      // Save to KV store
-      await projectsAPI.update(prjId, { invitations: project.invitations });
-      
-      console.log('Invitation created:', newInvitation);
       setInvitations([newInvitation, ...invitations]);
       setInviteEmail('');
       setInviteRole('member');
-      toast.success('Приглашение отправлено');
+      toast.success('Приглашение отправлено! Пользователь получит уведомление на email.');
       setActiveTab('invitations');
     } catch (error) {
       console.error('Invite error (catch block):', error);
@@ -406,36 +385,13 @@ export function ProjectMembersModal({
 
     try {
       setIsLoading(true);
-      const accessToken = await getAuthToken();
       
-      if (!accessToken) {
-        toast.error('Необходима авторизация');
-        setInviteToRevoke(null);
-        return;
-      }
+      // Revoke invitation using new API
+      await projectsAPI.revokeInvitation(prjId, inviteToRevoke.id);
       
-      // Fetch current projects
-      const projects = await projectsAPI.getAll();
-      const project = projects.find((p: any) => p.id === prjId);
-      
-      if (!project) {
-        toast.error('Проект не найден');
-        setInviteToRevoke(null);
-        return;
-      }
-      
-      // Update invitation status
-      const invitations = project.invitations || [];
-      const inviteIndex = invitations.findIndex((inv: Invitation) => inv.id === inviteToRevoke.id);
-      
-      if (inviteIndex !== -1) {
-        invitations[inviteIndex].status = 'revoked';
-        await projectsAPI.update(prjId, { invitations });
-        await fetchInvitations();
-        toast.success('Приглашение отозвано');
-      } else {
-        toast.error('Приглашение не найдено');
-      }
+      // Refresh invitations
+      await fetchInvitations();
+      toast.success('Приглашение отозвано');
     } catch (error) {
       console.error('Revoke invite error:', error);
       toast.error('Ошибка отзыва приглашения');
@@ -460,37 +416,15 @@ export function ProjectMembersModal({
 
     try {
       setIsLoading(true);
-      const accessToken = await getAuthToken();
       
-      if (!accessToken) {
-        toast.error('Необходима авторизация');
-        return;
-      }
+      // Update role using new API
+      await projectsAPI.updateMemberRole(prjId, memberId, newRole);
       
-      // Fetch current projects
-      const projects = await projectsAPI.getAll();
-      const project = projects.find((p: any) => p.id === prjId);
-      
-      if (!project) {
-        toast.error('Проект не найден');
-        return;
-      }
-      
-      // Update member role
-      const projectMembers = project.members || [];
-      const memberIndex = projectMembers.findIndex((m: any) => (m.id || m.userId) === memberId);
-      
-      if (memberIndex !== -1) {
-        projectMembers[memberIndex].role = newRole;
-        await projectsAPI.update(prjId, { members: projectMembers });
-        
-        setMembers(
-          members.map((m) => (m.id === memberId ? { ...m, role: newRole } : m))
-        );
-        toast.success('Роль обновлена');
-      } else {
-        toast.error('Участник не найден');
-      }
+      // Update local state
+      setMembers(
+        members.map((m) => (m.id === memberId ? { ...m, role: newRole } : m))
+      );
+      toast.success('Роль обновлена');
     } catch (error) {
       console.error('Change role error:', error);
       toast.error('Ошибка обновления роли');
@@ -514,29 +448,11 @@ export function ProjectMembersModal({
 
     try {
       setIsLoading(true);
-      const accessToken = await getAuthToken();
       
-      if (!accessToken) {
-        toast.error('Необходима авторизация');
-        setMemberToDelete(null);
-        return;
-      }
+      // Remove member using new API
+      await projectsAPI.removeMember(prjId, memberToDelete.id);
       
-      // Fetch current projects
-      const projects = await projectsAPI.getAll();
-      const project = projects.find((p: any) => p.id === prjId);
-      
-      if (!project) {
-        toast.error('Проект не найден');
-        setMemberToDelete(null);
-        return;
-      }
-      
-      // Remove member
-      const projectMembers = project.members || [];
-      const updatedMembers = projectMembers.filter((m: any) => (m.id || m.userId) !== memberToDelete.id);
-      
-      await projectsAPI.update(prjId, { members: updatedMembers });
+      // Update local state
       setMembers(members.filter((m) => m.id !== memberToDelete.id));
       toast.success('Участник удалён из проекта');
     } catch (error) {

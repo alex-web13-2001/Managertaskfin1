@@ -397,18 +397,59 @@ export const projectsAPI = {
     const userId = getUserIdFromToken();
     if (!userId) throw new Error('Invalid token');
 
-    const response = await fetch(`${API_BASE_URL}/api/kv/projects:${userId}`, {
+    // Fetch owned projects
+    const ownedResponse = await fetch(`${API_BASE_URL}/api/kv/projects:${userId}`, {
       headers: {
         'Authorization': `Bearer ${token}`,
       },
     });
 
-    if (!response.ok) {
+    if (!ownedResponse.ok) {
       throw new Error('Failed to fetch projects');
     }
 
-    const data = await response.json();
-    return data.value || [];
+    const ownedData = await ownedResponse.json();
+    const ownedProjects = ownedData.value || [];
+    
+    // Fetch shared projects (projects where user is a member)
+    const sharedResponse = await fetch(`${API_BASE_URL}/api/kv/shared_projects:${userId}`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+    
+    let sharedProjects = [];
+    if (sharedResponse.ok) {
+      const sharedData = await sharedResponse.json();
+      const projectRefs = sharedData.value || []; // Array of {projectId, ownerId, role}
+      
+      // Fetch actual project data for each shared project
+      for (const ref of projectRefs) {
+        try {
+          const projectResponse = await fetch(`${API_BASE_URL}/api/kv/project:${ref.projectId}`, {
+            headers: {
+              'Authorization': `Bearer ${token}`,
+            },
+          });
+          
+          if (projectResponse.ok) {
+            const projectData = await projectResponse.json();
+            if (projectData.value) {
+              sharedProjects.push({
+                ...projectData.value,
+                userRole: ref.role, // Add user's role in this project
+                isShared: true,
+              });
+            }
+          }
+        } catch (error) {
+          console.error(`Failed to fetch shared project ${ref.projectId}:`, error);
+        }
+      }
+    }
+    
+    // Combine owned and shared projects
+    return [...ownedProjects, ...sharedProjects];
   },
 
   create: async (projectData: any) => {
@@ -511,36 +552,510 @@ export const projectsAPI = {
     const tasks = await tasksAPI.getAll();
     return tasks.filter((t: any) => t.projectId === projectId);
   },
-};
-
-// ========== INVITATIONS API ==========
-
-export const invitationsAPI = {
-  getMyInvitations: async () => {
+  
+  // ========== PROJECT SHARING METHODS ==========
+  
+  /**
+   * Send invitation to join project
+   */
+  sendInvitation: async (projectId: string, email: string, role: 'admin' | 'collaborator' | 'member' | 'viewer') => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
     
     const userId = getUserIdFromToken();
     if (!userId) throw new Error('Invalid token');
-
-    const response = await fetch(`${API_BASE_URL}/api/kv/invitations:${userId}`, {
+    
+    // Create invitation
+    const invitationId = `inv_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    const invitation = {
+      id: invitationId,
+      projectId,
+      projectOwnerId: userId,
+      invitedEmail: email,
+      role,
+      status: 'pending',
+      sentDate: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(), // 7 days
+      inviteLink: `${window.location.origin}/invite/${invitationId}`,
+    };
+    
+    // Store invitation globally so invitee can see it
+    const invitationsResponse = await fetch(`${API_BASE_URL}/api/kv/pending_invitations`, {
       headers: {
         'Authorization': `Bearer ${token}`,
       },
     });
-
+    
+    let allInvitations = [];
+    if (invitationsResponse.ok) {
+      const data = await invitationsResponse.json();
+      allInvitations = data.value || [];
+    }
+    
+    allInvitations.push(invitation);
+    
+    await fetch(`${API_BASE_URL}/api/kv/pending_invitations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({ value: allInvitations }),
+    });
+    
+    // Also update project with invitation
+    const projects = await projectsAPI.getAll();
+    const projectIndex = projects.findIndex((p: any) => p.id === projectId);
+    
+    if (projectIndex !== -1) {
+      const project = projects[projectIndex];
+      project.invitations = [...(project.invitations || []), invitation];
+      await projectsAPI.update(projectId, { invitations: project.invitations });
+    }
+    
+    console.log('✅ Invitation sent:', invitation);
+    return invitation;
+  },
+  
+  /**
+   * Get invitations for current user (by email)
+   */
+  getMyPendingInvitations: async () => {
+    const token = getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+    
+    // Get current user email
+    const userResponse = await fetch(`${API_BASE_URL}/api/auth/me`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+    
+    if (!userResponse.ok) {
+      throw new Error('Failed to get current user');
+    }
+    
+    const userData = await userResponse.json();
+    const userEmail = userData.user.email;
+    
+    // Fetch all pending invitations
+    const response = await fetch(`${API_BASE_URL}/api/kv/pending_invitations`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+    
     if (!response.ok) {
+      return [];
+    }
+    
+    const data = await response.json();
+    const allInvitations = data.value || [];
+    
+    // Filter invitations for this user's email
+    return allInvitations.filter((inv: any) => 
+      inv.invitedEmail.toLowerCase() === userEmail.toLowerCase() && 
+      inv.status === 'pending' &&
+      new Date(inv.expiresAt) > new Date() // Not expired
+    );
+  },
+  
+  /**
+   * Accept project invitation
+   */
+  acceptInvitation: async (invitationId: string) => {
+    const token = getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
+    
+    // Get the invitation
+    const invitationsResponse = await fetch(`${API_BASE_URL}/api/kv/pending_invitations`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+    
+    if (!invitationsResponse.ok) {
       throw new Error('Failed to fetch invitations');
     }
+    
+    const invitationsData = await invitationsResponse.json();
+    const allInvitations = invitationsData.value || [];
+    const invitationIndex = allInvitations.findIndex((inv: any) => inv.id === invitationId);
+    
+    if (invitationIndex === -1) {
+      throw new Error('Invitation not found');
+    }
+    
+    const invitation = allInvitations[invitationIndex];
+    
+    // Check if expired
+    if (new Date(invitation.expiresAt) < new Date()) {
+      throw new Error('Invitation has expired');
+    }
+    
+    // Update invitation status
+    allInvitations[invitationIndex].status = 'accepted';
+    allInvitations[invitationIndex].acceptedAt = new Date().toISOString();
+    
+    await fetch(`${API_BASE_URL}/api/kv/pending_invitations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({ value: allInvitations }),
+    });
+    
+    // Add user to project's shared_projects list
+    const sharedProjectsResponse = await fetch(`${API_BASE_URL}/api/kv/shared_projects:${userId}`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+    
+    let sharedProjects = [];
+    if (sharedProjectsResponse.ok) {
+      const data = await sharedProjectsResponse.json();
+      sharedProjects = data.value || [];
+    }
+    
+    // Add project reference
+    sharedProjects.push({
+      projectId: invitation.projectId,
+      ownerId: invitation.projectOwnerId,
+      role: invitation.role,
+      joinedAt: new Date().toISOString(),
+    });
+    
+    await fetch(`${API_BASE_URL}/api/kv/shared_projects:${userId}`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({ value: sharedProjects }),
+    });
+    
+    // Store project data separately for shared access
+    // Fetch the project from owner
+    const projectResponse = await fetch(`${API_BASE_URL}/api/kv/projects:${invitation.projectOwnerId}`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+    
+    if (projectResponse.ok) {
+      const projectsData = await projectResponse.json();
+      const ownerProjects = projectsData.value || [];
+      const project = ownerProjects.find((p: any) => p.id === invitation.projectId);
+      
+      if (project) {
+        // Store project in shared location
+        await fetch(`${API_BASE_URL}/api/kv/project:${invitation.projectId}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify({ value: project }),
+        });
+        
+        // Add member to project
+        const members = project.members || [];
+        const userResponse = await fetch(`${API_BASE_URL}/api/auth/me`, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+          },
+        });
+        
+        if (userResponse.ok) {
+          const userData = await userResponse.json();
+          members.push({
+            id: userId,
+            userId: userId,
+            name: userData.user.name,
+            email: userData.user.email,
+            role: invitation.role,
+            addedDate: new Date().toISOString(),
+          });
+          
+          // Update project with new member
+          project.members = members;
+          
+          // Update in owner's projects
+          const projectIndex = ownerProjects.findIndex((p: any) => p.id === invitation.projectId);
+          if (projectIndex !== -1) {
+            ownerProjects[projectIndex] = project;
+            await fetch(`${API_BASE_URL}/api/kv/projects:${invitation.projectOwnerId}`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${token}`,
+              },
+              body: JSON.stringify({ value: ownerProjects }),
+            });
+          }
+          
+          // Update in shared location
+          await fetch(`${API_BASE_URL}/api/kv/project:${invitation.projectId}`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${token}`,
+            },
+            body: JSON.stringify({ value: project }),
+          });
+        }
+      }
+    }
+    
+    console.log('✅ Invitation accepted:', invitationId);
+    return { success: true, projectId: invitation.projectId };
+  },
+  
+  /**
+   * Reject project invitation
+   */
+  rejectInvitation: async (invitationId: string) => {
+    const token = getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+    
+    // Get the invitation
+    const invitationsResponse = await fetch(`${API_BASE_URL}/api/kv/pending_invitations`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+    
+    if (!invitationsResponse.ok) {
+      throw new Error('Failed to fetch invitations');
+    }
+    
+    const invitationsData = await invitationsResponse.json();
+    const allInvitations = invitationsData.value || [];
+    const invitationIndex = allInvitations.findIndex((inv: any) => inv.id === invitationId);
+    
+    if (invitationIndex === -1) {
+      throw new Error('Invitation not found');
+    }
+    
+    // Update invitation status
+    allInvitations[invitationIndex].status = 'rejected';
+    allInvitations[invitationIndex].rejectedAt = new Date().toISOString();
+    
+    await fetch(`${API_BASE_URL}/api/kv/pending_invitations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${token}`,
+      },
+      body: JSON.stringify({ value: allInvitations }),
+    });
+    
+    console.log('✅ Invitation rejected:', invitationId);
+    return { success: true };
+  },
+  
+  /**
+   * Revoke sent invitation (by project owner)
+   */
+  revokeInvitation: async (projectId: string, invitationId: string) => {
+    const token = getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
+    
+    // Update in pending invitations
+    const invitationsResponse = await fetch(`${API_BASE_URL}/api/kv/pending_invitations`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+    
+    if (invitationsResponse.ok) {
+      const invitationsData = await invitationsResponse.json();
+      const allInvitations = invitationsData.value || [];
+      const invitationIndex = allInvitations.findIndex((inv: any) => inv.id === invitationId);
+      
+      if (invitationIndex !== -1) {
+        allInvitations[invitationIndex].status = 'revoked';
+        allInvitations[invitationIndex].revokedAt = new Date().toISOString();
+        
+        await fetch(`${API_BASE_URL}/api/kv/pending_invitations`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify({ value: allInvitations }),
+        });
+      }
+    }
+    
+    // Update in project
+    const projects = await projectsAPI.getAll();
+    const projectIndex = projects.findIndex((p: any) => p.id === projectId);
+    
+    if (projectIndex !== -1) {
+      const project = projects[projectIndex];
+      const invitations = project.invitations || [];
+      const invIndex = invitations.findIndex((inv: any) => inv.id === invitationId);
+      
+      if (invIndex !== -1) {
+        invitations[invIndex].status = 'revoked';
+        invitations[invIndex].revokedAt = new Date().toISOString();
+        await projectsAPI.update(projectId, { invitations });
+      }
+    }
+    
+    console.log('✅ Invitation revoked:', invitationId);
+    return { success: true };
+  },
+  
+  /**
+   * Remove member from project
+   */
+  removeMember: async (projectId: string, memberId: string) => {
+    const token = getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
+    
+    // Get project
+    const projects = await projectsAPI.getAll();
+    const project = projects.find((p: any) => p.id === projectId);
+    
+    if (!project) {
+      throw new Error('Project not found');
+    }
+    
+    // Check if user is owner
+    if (project.userId !== userId) {
+      throw new Error('Only project owner can remove members');
+    }
+    
+    // Remove from project members
+    const members = project.members || [];
+    const updatedMembers = members.filter((m: any) => m.id !== memberId && m.userId !== memberId);
+    
+    await projectsAPI.update(projectId, { members: updatedMembers });
+    
+    // Remove from member's shared projects
+    const memberSharedResponse = await fetch(`${API_BASE_URL}/api/kv/shared_projects:${memberId}`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+    
+    if (memberSharedResponse.ok) {
+      const data = await memberSharedResponse.json();
+      const sharedProjects = data.value || [];
+      const updatedShared = sharedProjects.filter((ref: any) => ref.projectId !== projectId);
+      
+      await fetch(`${API_BASE_URL}/api/kv/shared_projects:${memberId}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify({ value: updatedShared }),
+      });
+    }
+    
+    console.log('✅ Member removed from project:', memberId);
+    return { success: true };
+  },
+  
+  /**
+   * Update member role in project
+   */
+  updateMemberRole: async (projectId: string, memberId: string, newRole: 'admin' | 'collaborator' | 'member' | 'viewer') => {
+    const token = getAuthToken();
+    if (!token) throw new Error('Not authenticated');
+    
+    const userId = getUserIdFromToken();
+    if (!userId) throw new Error('Invalid token');
+    
+    // Get project
+    const projects = await projectsAPI.getAll();
+    const project = projects.find((p: any) => p.id === projectId);
+    
+    if (!project) {
+      throw new Error('Project not found');
+    }
+    
+    // Check if user is owner
+    if (project.userId !== userId) {
+      throw new Error('Only project owner can update member roles');
+    }
+    
+    // Update member role
+    const members = project.members || [];
+    const memberIndex = members.findIndex((m: any) => m.id === memberId || m.userId === memberId);
+    
+    if (memberIndex !== -1) {
+      members[memberIndex].role = newRole;
+      await projectsAPI.update(projectId, { members });
+    }
+    
+    // Update in member's shared projects
+    const memberSharedResponse = await fetch(`${API_BASE_URL}/api/kv/shared_projects:${memberId}`, {
+      headers: {
+        'Authorization': `Bearer ${token}`,
+      },
+    });
+    
+    if (memberSharedResponse.ok) {
+      const data = await memberSharedResponse.json();
+      const sharedProjects = data.value || [];
+      const refIndex = sharedProjects.findIndex((ref: any) => ref.projectId === projectId);
+      
+      if (refIndex !== -1) {
+        sharedProjects[refIndex].role = newRole;
+        
+        await fetch(`${API_BASE_URL}/api/kv/shared_projects:${memberId}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`,
+          },
+          body: JSON.stringify({ value: sharedProjects }),
+        });
+      }
+    }
+    
+    console.log('✅ Member role updated:', memberId, newRole);
+    return { success: true };
+  },
+};
 
-    const data = await response.json();
-    return data.value || [];
+// ========== INVITATIONS API ==========
+
+export const invitationsAPI = {
+  /**
+   * Get invitations sent to current user's email
+   */
+  getMyInvitations: async () => {
+    return projectsAPI.getMyPendingInvitations();
   },
 
-  acceptInvitation: async (projectId: string, invitationId: string) => {
-    // TODO: Implement invitation acceptance
-    console.warn('Invitation acceptance not yet implemented');
-    return { success: true };
+  /**
+   * Accept an invitation (delegates to projectsAPI)
+   */
+  acceptInvitation: async (invitationId: string) => {
+    return projectsAPI.acceptInvitation(invitationId);
+  },
+  
+  /**
+   * Reject an invitation (delegates to projectsAPI)
+   */
+  rejectInvitation: async (invitationId: string) => {
+    return projectsAPI.rejectInvitation(invitationId);
   },
 };
 

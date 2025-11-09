@@ -553,9 +553,12 @@ export const projectsAPI = {
     const userId = getUserIdFromToken();
     if (!userId) throw new Error('Invalid token');
 
+    // Get all projects and filter out the one being deleted
     const projects = await projectsAPI.getAll();
+    const projectToDelete = projects.find((p: any) => p.id === projectId);
     const updatedProjects = projects.filter((p: any) => p.id !== projectId);
 
+    // Delete project from owner's projects list
     await fetch(`${API_BASE_URL}/api/kv/projects:${userId}`, {
       method: 'POST',
       headers: {
@@ -564,6 +567,53 @@ export const projectsAPI = {
       },
       body: JSON.stringify({ value: updatedProjects }),
     });
+    
+    // Clean up shared project data if it exists
+    try {
+      // Delete shared project data
+      await fetch(`${API_BASE_URL}/api/kv/project:${projectId}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+        },
+      });
+      
+      // If project has members, clean up their shared_projects references
+      if (projectToDelete && projectToDelete.members && Array.isArray(projectToDelete.members)) {
+        for (const member of projectToDelete.members) {
+          const memberId = member.userId || member.id;
+          if (memberId && memberId !== userId) {
+            try {
+              // Get member's shared projects
+              const memberSharedResponse = await fetch(`${API_BASE_URL}/api/kv/shared_projects:${memberId}`, {
+                headers: { 'Authorization': `Bearer ${token}` },
+              });
+              
+              if (memberSharedResponse.ok) {
+                const memberSharedData = await memberSharedResponse.json();
+                const memberSharedProjects = memberSharedData.value || [];
+                
+                // Remove this project from their shared list
+                const updatedMemberShared = memberSharedProjects.filter((ref: any) => ref.projectId !== projectId);
+                
+                await fetch(`${API_BASE_URL}/api/kv/shared_projects:${memberId}`, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${token}`,
+                  },
+                  body: JSON.stringify({ value: updatedMemberShared }),
+                });
+              }
+            } catch (error) {
+              console.error(`Failed to clean up shared project for member ${memberId}:`, error);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error cleaning up project shared data:', error);
+    }
 
     return true;
   },

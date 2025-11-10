@@ -42,7 +42,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { toast } from 'sonner';
-import { getAuthToken } from '../utils/supabase/client';
+import { getAuthToken, authAPI } from '../utils/supabase/client';
 import { projectsAPI } from '../utils/api-client';
 import { format } from 'date-fns';
 import { ru } from 'date-fns/locale';
@@ -56,6 +56,7 @@ type Member = {
   avatar: string;
   role: Role;
   addedDate: string;
+  status?: 'active' | 'invited';
 };
 
 type Invitation = {
@@ -102,6 +103,16 @@ const statusColors: Record<Invitation['status'], string> = {
   expired: 'bg-gray-100 text-gray-700',
   revoked: 'bg-red-100 text-red-700',
   accepted: 'bg-green-100 text-green-700',
+};
+
+const memberStatusLabels: Record<NonNullable<Member['status']>, string> = {
+  active: 'Активный',
+  invited: 'Приглашён',
+};
+
+const memberStatusColors: Record<NonNullable<Member['status']>, string> = {
+  active: 'bg-green-100 text-green-700',
+  invited: 'bg-blue-100 text-blue-700',
 };
 
 // Helper function to format dates
@@ -185,21 +196,51 @@ export function ProjectMembersModal({
   const [inviteToRevoke, setInviteToRevoke] = React.useState<Invitation | null>(null);
   const [activeTab, setActiveTab] = React.useState('members');
   const [isLoading, setIsLoading] = React.useState(false);
+  const [currentUserEmail, setCurrentUserEmail] = React.useState<string>('');
 
   const isOwner = currentUserRole === 'owner';
   const canManage = isOwner;
+
+  // Fetch current user email
+  React.useEffect(() => {
+    const fetchCurrentUserEmail = async () => {
+      try {
+        const user = await authAPI.getCurrentUser();
+        if (user && user.email) {
+          setCurrentUserEmail(user.email.toLowerCase());
+        }
+      } catch (error) {
+        console.error('Failed to fetch current user email:', error);
+      }
+    };
+    
+    if (open) {
+      fetchCurrentUserEmail();
+    }
+  }, [open]);
 
   // Fetch members and invitations
   React.useEffect(() => {
     if (open) {
       fetchMembers();
       fetchInvitations();
+      
+      // Set up polling to refresh member list every 10 seconds (silent refresh)
+      const pollInterval = setInterval(() => {
+        fetchMembers(false); // Silent refresh without loading spinner
+        fetchInvitations();
+      }, 10000);
+      
+      // Clean up interval on unmount or when modal closes
+      return () => clearInterval(pollInterval);
     }
   }, [open, prjId]);
 
-  const fetchMembers = async () => {
+  const fetchMembers = async (showLoading = true) => {
     try {
-      setIsLoading(true);
+      if (showLoading) {
+        setIsLoading(true);
+      }
       const accessToken = await getAuthToken();
       
       if (!accessToken) {
@@ -218,13 +259,95 @@ export function ProjectMembersModal({
         return;
       }
       
+      // Get project members list
+      const projectMembers = project.members || [];
+      
+      // Ensure owner is in the members list
+      const ownerId = project.userId;
+      const ownerInMembers = projectMembers.find((m: any) => 
+        (m.id === ownerId || m.userId === ownerId) && m.role === 'owner'
+      );
+      
+      let allMembers = projectMembers;
+      
+      // If owner is not in members, try to get owner info and add them
+      if (!ownerInMembers && ownerId) {
+        try {
+          const currentUser = await authAPI.getCurrentUser();
+          
+          // Check if current user is the owner
+          if (currentUser && currentUser.id === ownerId) {
+            // Add current user as owner
+            allMembers = [
+              {
+                id: ownerId,
+                userId: ownerId,
+                name: currentUser.name || currentUser.email,
+                email: currentUser.email,
+                role: 'owner',
+                status: 'active',
+                addedDate: project.createdAt || new Date().toISOString(),
+              },
+              ...projectMembers
+            ];
+          } else {
+            // For other users viewing the project, add placeholder owner info
+            allMembers = [
+              {
+                id: ownerId,
+                userId: ownerId,
+                name: 'Владелец проекта',
+                email: '',
+                role: 'owner',
+                status: 'active',
+                addedDate: project.createdAt || new Date().toISOString(),
+              },
+              ...projectMembers
+            ];
+          }
+        } catch (error) {
+          console.error('Error getting owner info:', error);
+          // Add placeholder owner
+          allMembers = [
+            {
+              id: ownerId,
+              userId: ownerId,
+              name: 'Владелец проекта',
+              email: '',
+              role: 'owner',
+              status: 'active',
+              addedDate: project.createdAt || new Date().toISOString(),
+            },
+            ...projectMembers
+          ];
+        }
+      }
+      
+      // Add pending invitations as "invited" members
+      const pendingInvitations = project.invitations || [];
+      const invitedMembers = pendingInvitations
+        .filter((inv: any) => inv.status === 'pending')
+        .map((inv: any) => ({
+          id: `inv_${inv.id}`,
+          userId: inv.id,
+          name: inv.email,
+          email: inv.email,
+          role: inv.role,
+          status: 'invited' as const,
+          addedDate: inv.sentDate || new Date().toISOString(),
+        }));
+      
+      // Combine accepted members with pending invitations
+      const allMembersWithInvited = [...allMembers, ...invitedMembers];
+      
       // Transform members to match expected format
-      const transformedMembers = (project.members || []).map((m: any) => ({
+      const transformedMembers = allMembersWithInvited.map((m: any) => ({
         id: m.id || m.userId,
-        name: m.name || m.email,
+        name: m.name || m.email || 'Без имени',
         email: m.email,
         avatar: m.name ? m.name.split(' ').map((n: string) => n[0]).join('').toUpperCase() : m.email?.[0]?.toUpperCase() || '?',
         role: m.role,
+        status: m.status || 'active',
         addedDate: m.addedDate ? new Date(m.addedDate).toLocaleDateString('ru-RU') : 'Недавно',
       }));
       
@@ -233,7 +356,9 @@ export function ProjectMembersModal({
       console.error('Fetch members error:', error);
       setMembers([]);
     } finally {
-      setIsLoading(false);
+      if (showLoading) {
+        setIsLoading(false);
+      }
     }
   };
 
@@ -295,6 +420,12 @@ export function ProjectMembersModal({
       return;
     }
 
+    // Проверка на самоприглашение
+    if (currentUserEmail && inviteEmail.toLowerCase() === currentUserEmail) {
+      toast.error('Нельзя пригласить самого себя');
+      return;
+    }
+
     // Проверка на уже существующего участника
     if (members.some((m) => m.email && m.email.toLowerCase() === inviteEmail.toLowerCase())) {
       toast.error('Пользователь уже является участником проекта');
@@ -328,7 +459,7 @@ export function ProjectMembersModal({
       // Refresh invitation list from server to get latest data
       await fetchInvitations();
       
-      toast.success('Приглашение отправлено! Пользователь получит уведомление на email.');
+      toast.success('Приглашение успешно отправлено');
       setActiveTab('invitations');
     } catch (error) {
       console.error('Invite error (catch block):', error);
@@ -534,13 +665,14 @@ export function ProjectMembersModal({
 
                       <div className="flex items-center gap-3">
                         <div className="text-right min-w-[200px]">
-                          {canManage && member.role !== 'owner' ? (
+                          {canManage && member.role !== 'owner' && member.status !== 'invited' ? (
                             <>
                               <Select
                                 value={member.role}
                                 onValueChange={(value) =>
                                   handleChangeRole(member.id, value as Role)
                                 }
+                                disabled={member.status === 'invited'}
                               >
                                 <SelectTrigger className="w-full">
                                   <SelectValue />
@@ -560,15 +692,29 @@ export function ProjectMembersModal({
                               <p className="text-xs text-gray-500 mt-1">
                                 {roleDescriptions[member.role]}
                               </p>
-                              <p className="text-xs text-gray-500 mt-1">
-                                Добавлен {member.addedDate}
-                              </p>
+                              <div className="flex items-center gap-2 mt-1">
+                                <p className="text-xs text-gray-500">
+                                  Добавлен {member.addedDate}
+                                </p>
+                                {member.status && (
+                                  <Badge variant="outline" className={`text-xs ${memberStatusColors[member.status]}`}>
+                                    {memberStatusLabels[member.status]}
+                                  </Badge>
+                                )}
+                              </div>
                             </>
                           ) : (
                             <>
-                              <Badge variant="outline" className="bg-purple-100 text-purple-700">
-                                {roleLabels[member.role]}
-                              </Badge>
+                              <div className="flex items-center gap-2 mb-1">
+                                <Badge variant="outline" className="bg-purple-100 text-purple-700">
+                                  {roleLabels[member.role]}
+                                </Badge>
+                                {member.status && (
+                                  <Badge variant="outline" className={`text-xs ${memberStatusColors[member.status]}`}>
+                                    {memberStatusLabels[member.status]}
+                                  </Badge>
+                                )}
+                              </div>
                               <p className="text-xs text-gray-500 mt-1">
                                 Добавлен {member.addedDate}
                               </p>
@@ -576,7 +722,7 @@ export function ProjectMembersModal({
                           )}
                         </div>
 
-                        {canManage && member.role !== 'owner' && (
+                        {canManage && member.role !== 'owner' && member.status !== 'invited' && (
                           <Button
                             variant="ghost"
                             size="icon"

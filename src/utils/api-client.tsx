@@ -647,8 +647,33 @@ export const projectsAPI = {
       }
     }
     
+    // Get current user info for adding as owner if needed
+    const currentUser = await authAPI.getCurrentUser();
+    
+    // Ensure owned projects have owner in members list
+    const ownedProjectsWithOwner = ownedProjects.map((project: any) => {
+      if (!project.members || !project.members.find((m: any) => m.role === 'owner')) {
+        return {
+          ...project,
+          members: [
+            {
+              id: userId,
+              userId: userId,
+              name: currentUser?.name || currentUser?.email || 'Владелец',
+              email: currentUser?.email || '',
+              role: 'owner',
+              status: 'active',
+              addedDate: project.createdAt || new Date().toISOString(),
+            },
+            ...(project.members || [])
+          ]
+        };
+      }
+      return project;
+    });
+    
     // Combine owned and shared projects
-    return [...ownedProjects, ...sharedProjects];
+    return [...ownedProjectsWithOwner, ...sharedProjects];
   },
 
   create: async (projectData: any) => {
@@ -657,6 +682,9 @@ export const projectsAPI = {
     
     const userId = getUserIdFromToken();
     if (!userId) throw new Error('Invalid token');
+
+    // Get current user info to add as owner member
+    const currentUser = await authAPI.getCurrentUser();
 
     // Fetch only owned projects, not shared projects
     const ownedProjectsResponse = await fetch(`${API_BASE_URL}/api/kv/projects:${userId}`, {
@@ -677,6 +705,20 @@ export const projectsAPI = {
       userId: userId, // Set the owner's userId
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      // Initialize members array with owner
+      members: [
+        {
+          id: userId,
+          userId: userId,
+          name: currentUser?.name || currentUser?.email || 'Владелец',
+          email: currentUser?.email || '',
+          role: 'owner',
+          status: 'active',
+          addedDate: new Date().toISOString(),
+        },
+        ...(projectData.members || [])
+      ],
+      invitations: projectData.invitations || [],
     };
 
     projects.push(newProject);
@@ -1159,6 +1201,7 @@ export const projectsAPI = {
             name: userData.user.name,
             email: userData.user.email,
             role: invitation.role,
+            status: 'active',
             addedDate: new Date().toISOString(),
           });
           

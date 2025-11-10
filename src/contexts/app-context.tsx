@@ -1184,8 +1184,8 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   /**
    * Check if user can delete task
-   * Owner, Admin/Collaborator - can delete any task in project
-   * Member - can only delete tasks they created OR are assigned to
+   * Owner, Collaborator - can delete any task in project
+   * Member - CANNOT delete tasks (security requirement)
    * Viewer - cannot delete
    */
   const canDeleteTask = React.useCallback((task: Task): boolean => {
@@ -1203,9 +1203,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       return true;
     }
     
-    // Member can delete tasks they created OR are assigned to
+    // Member CANNOT delete tasks (fixed per security requirements)
     if (role === 'member') {
-      return task.userId === currentUser.id || task.assigneeId === currentUser.id;
+      return false;
     }
     
     // Viewer cannot delete

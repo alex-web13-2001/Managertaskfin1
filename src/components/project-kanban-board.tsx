@@ -41,6 +41,7 @@ const DraggableTaskCard = React.forwardRef<HTMLDivElement, {
   index: number;
   moveCard: (draggedId: string, targetId: string, position: 'before' | 'after') => void;
   isInitialRender: boolean;
+  canDrag?: boolean;
 }>(({
   task,
   onClick,
@@ -48,6 +49,7 @@ const DraggableTaskCard = React.forwardRef<HTMLDivElement, {
   index,
   moveCard,
   isInitialRender,
+  canDrag = true,
 }, forwardedRef) => {
   const { teamMembers, categories, setIsDragging } = useApp();
   const [dropPosition, setDropPosition] = React.useState<'before' | 'after' | null>(null);
@@ -67,6 +69,7 @@ const DraggableTaskCard = React.forwardRef<HTMLDivElement, {
   
   const [{ isDragging }, drag] = useDrag(() => ({
     type: ITEM_TYPE,
+    canDrag: () => canDrag,
     item: () => {
       setIsDragging(true);
       return { taskId: task.id, currentStatus: task.status, index };
@@ -77,7 +80,7 @@ const DraggableTaskCard = React.forwardRef<HTMLDivElement, {
     end: () => {
       setIsDragging(false);
     },
-  }));
+  }), [canDrag, task.id, task.status, index]);
 
   const [{ isOver }, drop] = useDrop(() => ({
     accept: ITEM_TYPE,
@@ -275,6 +278,7 @@ const DroppableColumn = ({
   isOverdue: (deadline?: string) => boolean;
   moveCardWithinColumn: (draggedId: string, targetId: string, position: 'before' | 'after') => void;
   isFirstRender: boolean;
+  canDrag?: boolean;
 }) => {
   const [{ isOver }, drop] = useDrop(() => ({
     accept: ITEM_TYPE,
@@ -318,6 +322,7 @@ const DroppableColumn = ({
               isOverdue={isOverdue(task.deadline)}
               moveCard={moveCardWithinColumn}
               isInitialRender={isFirstRender}
+              canDrag={canDrag}
             />
           ))}
         </AnimatePresence>
@@ -653,6 +658,9 @@ export function ProjectKanbanBoard({
   const userRole = getUserRoleInProject(projectId);
   const hasLimitedAccess = userRole === 'member';
   const hasNoTasks = projectTasks.length === 0;
+  
+  // Only viewers cannot drag tasks (members can drag/edit their own tasks)
+  const canDragTasks = userRole !== 'viewer';
 
   // Show skeleton during initial load
   if (isInitialLoad) {
@@ -693,6 +701,7 @@ export function ProjectKanbanBoard({
               isOverdue={isOverdue}
               moveCardWithinColumn={handleMoveCard}
               isFirstRender={isFirstRender}
+              canDrag={canDragTasks}
             />
           ))}
         </div>

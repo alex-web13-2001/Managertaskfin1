@@ -27,6 +27,7 @@ import { format } from 'date-fns';
 import { ru } from 'date-fns/locale';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner@2.0.3';
+import { KanbanBoardSkeleton } from './kanban-skeleton';
 import type { Task as TaskType, CustomColumn } from '../contexts/app-context';
 
 const ITEM_TYPE = 'PERSONAL_TASK_CARD';
@@ -332,7 +333,7 @@ export function PersonalKanbanBoard({
   filters: { priorities: string[]; deadline: string };
   onTaskClick: (taskId: string) => void;
 }) {
-  const { tasks, updateTask, currentUser, customColumns: contextCustomColumns, saveCustomColumns } = useApp();
+  const { tasks, updateTask, currentUser, customColumns: contextCustomColumns, saveCustomColumns, isInitialLoad } = useApp();
   const [isAddingColumn, setIsAddingColumn] = React.useState(false);
   const [newColumnTitle, setNewColumnTitle] = React.useState('');
   const [editingColumnId, setEditingColumnId] = React.useState<string | null>(null);
@@ -628,6 +629,11 @@ export function PersonalKanbanBoard({
       toast.error('Ошибка при удалении столбца');
     }
   };
+
+  // Show skeleton during initial load
+  if (isInitialLoad) {
+    return <KanbanBoardSkeleton columnCount={3} />;
+  }
 
   return (
     <div className="flex-1 flex flex-col bg-gray-50 h-full overflow-hidden">

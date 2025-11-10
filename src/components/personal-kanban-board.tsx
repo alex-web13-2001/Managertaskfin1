@@ -28,7 +28,8 @@ import { ru } from 'date-fns/locale';
 import { motion, AnimatePresence } from 'framer-motion';
 import { toast } from 'sonner@2.0.3';
 import { KanbanBoardSkeleton } from './kanban-skeleton';
-import { generateOrderKey, compareOrderKeys } from '../utils/orderKey';
+import { compareOrderKeys } from '../utils/orderKey';
+import { useKanbanDnD } from '../hooks/useKanbanDnD';
 import type { Task as TaskType, CustomColumn } from '../contexts/app-context';
 
 const ITEM_TYPE = 'PERSONAL_TASK_CARD';
@@ -250,6 +251,23 @@ const DraggableTaskCard = React.forwardRef<HTMLDivElement, {
 
 DraggableTaskCard.displayName = 'DraggableTaskCard';
 
+// Мемоизированная версия для оптимизации производительности
+const MemoizedDraggableTaskCard = React.memo(DraggableTaskCard, (prevProps, nextProps) => {
+  // Перерисовываем только если изменились критичные пропсы
+  return (
+    prevProps.task.id === nextProps.task.id &&
+    prevProps.task.title === nextProps.task.title &&
+    prevProps.task.status === nextProps.task.status &&
+    prevProps.task.priority === nextProps.task.priority &&
+    prevProps.task.deadline === nextProps.task.deadline &&
+    prevProps.task.updatedAt === nextProps.task.updatedAt &&
+    prevProps.isOverdue === nextProps.isOverdue &&
+    prevProps.index === nextProps.index &&
+    prevProps.isInitialRender === nextProps.isInitialRender &&
+    prevProps.canDrag === nextProps.canDrag
+  );
+});
+
 // Droppable Column Component
 const DroppableColumn = ({
   columnId,
@@ -333,7 +351,7 @@ const DroppableColumn = ({
       >
         <AnimatePresence mode="popLayout">
           {tasks.map((task, index) => (
-            <DraggableTaskCard
+            <MemoizedDraggableTaskCard
               key={task.id}
               task={task}
               index={index}
@@ -350,6 +368,19 @@ const DroppableColumn = ({
   );
 };
 
+// Мемоизированная версия DroppableColumn
+const MemoizedDroppableColumn = React.memo(DroppableColumn, (prevProps, nextProps) => {
+  // Перерисовываем только если изменились критичные пропсы
+  return (
+    prevProps.columnId === nextProps.columnId &&
+    prevProps.title === nextProps.title &&
+    prevProps.tasks.length === nextProps.tasks.length &&
+    prevProps.tasks.every((task, index) => task.id === nextProps.tasks[index]?.id && task.updatedAt === nextProps.tasks[index]?.updatedAt) &&
+    prevProps.isFirstRender === nextProps.isFirstRender &&
+    prevProps.canDrag === nextProps.canDrag
+  );
+});
+
 export function PersonalKanbanBoard({
   filters,
   onTaskClick,
@@ -363,8 +394,6 @@ export function PersonalKanbanBoard({
   const [editingColumnId, setEditingColumnId] = React.useState<string | null>(null);
   const [editingColumnTitle, setEditingColumnTitle] = React.useState('');
   const [deleteConfirmId, setDeleteConfirmId] = React.useState<string | null>(null);
-  // Task order state to preserve drag-drop order
-  const [taskOrder, setTaskOrder] = React.useState<Record<string, string[]>>({});
   // Track if this is the first render to avoid fade-in animation on initial load
   const [isFirstRender, setIsFirstRender] = React.useState(true);
   
@@ -458,35 +487,14 @@ export function PersonalKanbanBoard({
     });
   }, [tasks, filters]);
 
-  // Clean up taskOrder - remove IDs that don't exist in current personal tasks
-  // Используем startTransition для низкоприоритетного обновления
-  React.useEffect(() => {
-    const currentTaskIds = new Set(personalTasks.map(t => t.id));
-    
-    React.startTransition(() => {
-      setTaskOrder(prev => {
-        let needsCleanup = false;
-        const cleanedOrder: Record<string, string[]> = {};
-        
-        Object.entries(prev).forEach(([status, ids]) => {
-          const cleanedIds = ids.filter(id => currentTaskIds.has(id));
-          if (cleanedIds.length !== ids.length) {
-            needsCleanup = true;
-          }
-          if (cleanedIds.length > 0) {
-            cleanedOrder[status] = cleanedIds;
-          }
-        });
-        
-        if (needsCleanup) {
-          console.log('[PersonalKanban] Cleaning up taskOrder, removed stale IDs');
-          return cleanedOrder;
-        }
-        
-        return prev;
-      });
-    });
-  }, [personalTasks]);
+  // Use custom hook for DnD logic
+  const { taskOrder, handleMoveCard, handleStatusChange } = useKanbanDnD({
+    tasks: personalTasks,
+    onUpdateTask: updateTask,
+  });
+
+  // Wrap isOverdue in useCallback for memoization
+  const isOverdueMemoized = React.useCallback(isOverdue, [tasks]);
 
   // Group tasks by status into columns
   const columns = React.useMemo(() => {
@@ -530,117 +538,14 @@ export function PersonalKanbanBoard({
     });
   }, [personalTasks, allColumnDefinitions, taskOrder]);
 
-  // Handle task status change
-  const handleTaskStatusChange = async (taskId: string, newStatus: string) => {
-    try {
-      // Используем silent режим для перемещения карточек, чтобы не показывать toast каждый раз
-      await updateTask(taskId, { status: newStatus }, { silent: true });
-    } catch (error) {
-      console.error('Error updating task status:', error);
-    }
-  };
+  // Wrap handlers in useCallback for memoization
+  const handleMoveCardCallback = React.useCallback((draggedId: string, targetId: string, position: 'before' | 'after') => {
+    return handleMoveCard(draggedId, targetId, position, personalTasks);
+  }, [handleMoveCard, personalTasks]);
 
-  // Handle moving card within or between columns
-  const handleMoveCard = async (draggedId: string, targetId: string, position: 'before' | 'after') => {
-    const draggedTask = tasks.find(t => t.id === draggedId);
-    const targetTask = tasks.find(t => t.id === targetId);
-    
-    if (!draggedTask || !targetTask) {
-      console.log('[PersonalKanban] Task not found:', { draggedId, targetId });
-      return;
-    }
-
-    const sourceStatus = draggedTask.status;
-    const targetStatus = targetTask.status;
-    
-    console.log('[PersonalKanban] Moving card:', { draggedId, sourceStatus, targetStatus, position });
-    
-    // Получаем все задачи целевого столбца, отсортированные по orderKey
-    const targetColumnTasks = personalTasks
-      .filter(t => t.status === targetStatus)
-      .sort((a, b) => compareOrderKeys(a.orderKey || 'n', b.orderKey || 'n'));
-    
-    // Находим индекс целевой задачи
-    const targetIndex = targetColumnTasks.findIndex(t => t.id === targetId);
-    
-    // Вычисляем новый orderKey на основе соседей
-    let newOrderKey: string;
-    let beforeTask: TaskType | undefined;
-    let afterTask: TaskType | undefined;
-    
-    if (position === 'before') {
-      // Вставляем перед целевой задачей
-      afterTask = targetTask;
-      beforeTask = targetIndex > 0 ? targetColumnTasks[targetIndex - 1] : undefined;
-    } else {
-      // Вставляем после целевой задачи
-      beforeTask = targetTask;
-      afterTask = targetIndex < targetColumnTasks.length - 1 ? targetColumnTasks[targetIndex + 1] : undefined;
-    }
-    
-    // Генерируем новый orderKey между соседями
-    newOrderKey = generateOrderKey(beforeTask?.orderKey, afterTask?.orderKey);
-    
-    console.log('[PersonalKanban] Generated orderKey:', {
-      newOrderKey,
-      beforeKey: beforeTask?.orderKey,
-      afterKey: afterTask?.orderKey,
-      position
-    });
-    
-    // Оптимистичное обновление: сразу обновляем локальное состояние для мгновенной визуальной обратной связи
-    setTaskOrder(prev => {
-      const updated = { ...prev };
-      
-      // Get tasks for target column
-      const targetColumnTaskIds = targetColumnTasks.map(t => t.id);
-      
-      // Remove ALL instances of dragged task from order (deduplication)
-      let newOrder = targetColumnTaskIds.filter(id => id !== draggedId);
-      
-      // Find target index
-      const targetIdx = newOrder.indexOf(targetId);
-      
-      // Insert at the correct position
-      if (targetIdx !== -1) {
-        const insertIndex = position === 'before' ? targetIdx : targetIdx + 1;
-        newOrder.splice(insertIndex, 0, draggedId);
-      } else {
-        // If target not found, add to end
-        newOrder.push(draggedId);
-      }
-      
-      // Deduplicate the final order array
-      const uniqueOrder = Array.from(new Set(newOrder));
-      updated[targetStatus] = uniqueOrder;
-      
-      // If moving between different statuses, clean up source column
-      if (sourceStatus !== targetStatus && prev[sourceStatus]) {
-        const cleanedSource = Array.from(new Set(prev[sourceStatus].filter(id => id !== draggedId)));
-        updated[sourceStatus] = cleanedSource;
-      }
-      
-      console.log('[PersonalKanban] Updated taskOrder (optimistic, deduplicated):', updated);
-      return updated;
-    });
-    
-    // Обновляем задачу на сервере с новым orderKey и статусом
-    const updates: Partial<TaskType> = {
-      orderKey: newOrderKey,
-    };
-    
-    // Если меняется статус, добавляем его в обновления
-    if (sourceStatus !== targetStatus) {
-      updates.status = targetStatus;
-    }
-    
-    // Отправляем обновление на сервер (не ждем ответа для плавности UI)
-    updateTask(draggedId, updates, { silent: true }).catch(error => {
-      console.error('[PersonalKanban] Failed to update task:', error);
-      // При ошибке можно реализовать откат (revert), но пока оставляем как есть
-      // для минимальных изменений
-    });
-  };
+  const handleTaskClick = React.useCallback((taskId: string) => {
+    onTaskClick(taskId);
+  }, [onTaskClick]);
 
   // Handle adding new column
   const handleAddColumn = async () => {
@@ -710,16 +615,16 @@ export function PersonalKanbanBoard({
             const isCustom = !baseColumnDefinitions.find(base => base.id === column.id);
             
             return (
-              <DroppableColumn
+              <MemoizedDroppableColumn
                 key={column.id}
                 columnId={column.id}
                 title={column.title}
                 color={column.color}
                 tasks={column.tasks}
-                onDrop={handleTaskStatusChange}
-                onTaskClick={onTaskClick}
-                isOverdue={isOverdue}
-                moveCardWithinColumn={handleMoveCard}
+                onDrop={handleStatusChange}
+                onTaskClick={handleTaskClick}
+                isOverdue={isOverdueMemoized}
+                moveCardWithinColumn={handleMoveCardCallback}
                 isCustom={isCustom}
                 isFirstRender={isFirstRender}
                 canDrag={true}

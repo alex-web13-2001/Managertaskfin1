@@ -703,6 +703,38 @@ app.get('/api/projects/:projectId/tasks', authenticate, async (req: AuthRequest,
   }
 });
 
+/**
+ * GET /api/projects/:projectId/members
+ * Get all members of a project
+ */
+app.get('/api/projects/:projectId/members', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.sub;
+    const { projectId } = req.params;
+
+    // Check if user has access to the project
+    const role = await getUserRoleInProject(userId, projectId);
+    if (!role) {
+      return res.status(403).json({ error: 'You do not have access to this project' });
+    }
+
+    // Fetch project members
+    const members = await prisma.projectMember.findMany({
+      where: { projectId: projectId },
+      include: {
+        user: {
+          select: { id: true, name: true, avatarUrl: true, email: true },
+        },
+      },
+    });
+
+    res.json(members);
+  } catch (error: any) {
+    console.error('Get project members error:', error);
+    res.status(500).json({ error: 'Failed to fetch project members' });
+  }
+});
+
 // ========== INVITATION ROUTES ==========
 // Mount invitation routes (handles /api/invitations/* and /api/projects/:projectId/invitations)
 app.use('/api/invitations', authenticate, invitationRoutes);
@@ -835,6 +867,144 @@ app.post('/api/upload-project-attachment', authenticate, upload.single('file'), 
   } catch (error: any) {
     console.error('Upload project attachment error:', error);
     res.status(500).json({ error: 'Failed to upload project attachment' });
+  }
+});
+
+// ========== USER SETTINGS ENDPOINTS ==========
+
+/**
+ * GET /api/users/:userId/custom_columns
+ * Get custom status columns for a user
+ */
+app.get('/api/users/:userId/custom_columns', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { userId } = req.params;
+    
+    // Ensure user is requesting their own data
+    if (req.user!.sub !== userId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    // Use KV store for now (temporary until added to Prisma schema)
+    const kvStore = await import('./kv_store.js');
+    const columns = await kvStore.get(`custom_columns:${userId}`) || [];
+    
+    res.json(columns);
+  } catch (error: any) {
+    console.error('Get custom columns error:', error);
+    res.status(500).json({ error: 'Failed to fetch custom columns' });
+  }
+});
+
+/**
+ * POST /api/users/:userId/custom_columns
+ * Save custom status columns for a user
+ */
+app.post('/api/users/:userId/custom_columns', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { userId } = req.params;
+    const { columns } = req.body;
+    
+    // Ensure user is updating their own data
+    if (req.user!.sub !== userId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    // Use KV store for now (temporary until added to Prisma schema)
+    const kvStore = await import('./kv_store.js');
+    await kvStore.set(`custom_columns:${userId}`, columns);
+    
+    res.json(columns);
+  } catch (error: any) {
+    console.error('Save custom columns error:', error);
+    res.status(500).json({ error: 'Failed to save custom columns' });
+  }
+});
+
+/**
+ * GET /api/users/:userId/categories
+ * Get task categories for a user
+ */
+app.get('/api/users/:userId/categories', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { userId } = req.params;
+    
+    // Ensure user is requesting their own data
+    if (req.user!.sub !== userId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    // Use KV store for now (temporary until added to Prisma schema)
+    const kvStore = await import('./kv_store.js');
+    const categories = await kvStore.get(`categories:${userId}`) || [];
+    
+    res.json(categories);
+  } catch (error: any) {
+    console.error('Get categories error:', error);
+    res.status(500).json({ error: 'Failed to fetch categories' });
+  }
+});
+
+/**
+ * POST /api/users/:userId/categories
+ * Save task categories for a user
+ */
+app.post('/api/users/:userId/categories', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const { userId } = req.params;
+    const { categories } = req.body;
+    
+    // Ensure user is updating their own data
+    if (req.user!.sub !== userId) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+
+    // Use KV store for now (temporary until added to Prisma schema)
+    const kvStore = await import('./kv_store.js');
+    await kvStore.set(`categories:${userId}`, categories);
+    
+    res.json(categories);
+  } catch (error: any) {
+    console.error('Save categories error:', error);
+    res.status(500).json({ error: 'Failed to save categories' });
+  }
+});
+
+/**
+ * GET /api/my/pending_invitations
+ * Get pending invitations for the current user
+ */
+app.get('/api/my/pending_invitations', authenticate, async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.sub;
+    
+    // Get user email
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { email: true },
+    });
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+
+    // Find pending invitations by email
+    const invitations = await prisma.invitation.findMany({
+      where: {
+        email: user.email,
+        status: 'pending',
+      },
+      include: {
+        project: {
+          select: { id: true, name: true, color: true },
+        },
+      },
+    });
+
+    res.json(invitations);
+  } catch (error: any) {
+    console.error('Get pending invitations error:', error);
+    res.status(500).json({ error: 'Failed to fetch pending invitations' });
   }
 });
 
@@ -1127,19 +1297,20 @@ app.post('/api/invitations/send-email', authenticate, async (req: AuthRequest, r
 });
 
 /**
- * GET /api/invitations/:invitationId
- * Get invitation details by ID (for invite page) - REFACTORED TO USE PRISMA
+ * GET /api/invitations/:token
+ * Get invitation details by token (for invite page) - REFACTORED TO USE PRISMA
+ * Note: This endpoint is public (no authentication) since users need to view invitations before logging in
  */
-app.get('/api/invitations/:invitationId', async (req: Request, res: Response) => {
+app.get('/api/invitations/:token', async (req: Request, res: Response) => {
   try {
-    const { invitationId } = req.params;
+    const { token } = req.params;
     
-    // Get invitation from database
+    // Get invitation from database by token
     const invitation = await prisma.invitation.findUnique({
-      where: { id: invitationId },
+      where: { token: token },
       include: {
         project: {
-          select: { name: true, id: true },
+          select: { name: true, id: true, color: true },
         },
       },
     });
@@ -1161,8 +1332,15 @@ app.get('/api/invitations/:invitationId', async (req: Request, res: Response) =>
     
     res.json({
       invitation: {
-        ...invitation,
+        id: invitation.id,
+        token: invitation.token,
+        email: invitation.email,
+        role: invitation.role,
+        status: invitation.status,
+        expiresAt: invitation.expiresAt,
+        projectId: invitation.projectId,
         projectName: invitation.project.name,
+        projectColor: invitation.project.color,
       },
     });
   } catch (error: any) {

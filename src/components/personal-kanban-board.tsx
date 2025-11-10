@@ -145,7 +145,12 @@ const DraggableTaskCard = React.forwardRef<HTMLDivElement, {
         transition={{ 
           opacity: { duration: 0.15 },
           scale: { duration: 0.2 },
-          layout: { duration: 0.2, ease: 'easeOut' }
+          layout: { 
+            type: 'spring',
+            stiffness: 500,
+            damping: 35,
+            mass: 0.5
+          }
         }}
         className="cursor-move"
       >
@@ -448,29 +453,32 @@ export function PersonalKanbanBoard({
   }, [tasks, filters]);
 
   // Clean up taskOrder - remove IDs that don't exist in current personal tasks
+  // Используем startTransition для низкоприоритетного обновления
   React.useEffect(() => {
     const currentTaskIds = new Set(personalTasks.map(t => t.id));
     
-    setTaskOrder(prev => {
-      let needsCleanup = false;
-      const cleanedOrder: Record<string, string[]> = {};
-      
-      Object.entries(prev).forEach(([status, ids]) => {
-        const cleanedIds = ids.filter(id => currentTaskIds.has(id));
-        if (cleanedIds.length !== ids.length) {
-          needsCleanup = true;
+    React.startTransition(() => {
+      setTaskOrder(prev => {
+        let needsCleanup = false;
+        const cleanedOrder: Record<string, string[]> = {};
+        
+        Object.entries(prev).forEach(([status, ids]) => {
+          const cleanedIds = ids.filter(id => currentTaskIds.has(id));
+          if (cleanedIds.length !== ids.length) {
+            needsCleanup = true;
+          }
+          if (cleanedIds.length > 0) {
+            cleanedOrder[status] = cleanedIds;
+          }
+        });
+        
+        if (needsCleanup) {
+          console.log('[PersonalKanban] Cleaning up taskOrder, removed stale IDs');
+          return cleanedOrder;
         }
-        if (cleanedIds.length > 0) {
-          cleanedOrder[status] = cleanedIds;
-        }
+        
+        return prev;
       });
-      
-      if (needsCleanup) {
-        console.log('[PersonalKanban] Cleaning up taskOrder, removed stale IDs');
-        return cleanedOrder;
-      }
-      
-      return prev;
     });
   }, [personalTasks]);
 

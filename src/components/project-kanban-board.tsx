@@ -26,6 +26,7 @@ import { format } from 'date-fns';
 import { ru } from 'date-fns/locale';
 import { useDrag, useDrop } from 'react-dnd';
 import { motion, AnimatePresence } from 'motion/react';
+import { KanbanBoardSkeleton } from './kanban-skeleton';
 import type { Filters } from './filters-panel';
 import type { Task as TaskType } from '../contexts/app-context';
 
@@ -320,7 +321,7 @@ export function ProjectKanbanBoard({
   filters,
   onTaskClick,
 }: ProjectKanbanBoardProps) {
-  const { tasks, updateTask, getUserRoleInProject, canViewAllProjectTasks, currentUser } = useApp();
+  const { tasks, updateTask, getUserRoleInProject, canViewAllProjectTasks, currentUser, isInitialLoad } = useApp();
   const [isAddingColumn, setIsAddingColumn] = React.useState(false);
   const [newColumnName, setNewColumnName] = React.useState('');
   const [editingColumnId, setEditingColumnId] = React.useState<string | null>(null);
@@ -591,6 +592,11 @@ export function ProjectKanbanBoard({
   const userRole = getUserRoleInProject(projectId);
   const hasLimitedAccess = userRole === 'member';
   const hasNoTasks = projectTasks.length === 0;
+
+  // Show skeleton during initial load
+  if (isInitialLoad) {
+    return <KanbanBoardSkeleton columnCount={4} />;
+  }
 
   return (
     <div className="flex-1 flex flex-col bg-gray-50 h-full overflow-hidden">

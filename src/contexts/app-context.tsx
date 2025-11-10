@@ -27,6 +27,36 @@ const getUserIdFromToken = (): string | null => {
   }
 };
 
+/**
+ * Deep comparison helper to check if arrays have different content
+ * Returns true if arrays are different (need update), false if same
+ */
+const areArraysDifferent = <T extends { id: string; updatedAt?: string }>(
+  current: T[],
+  incoming: T[]
+): boolean => {
+  // Quick length check
+  if (current.length !== incoming.length) return true;
+  
+  // Create maps for efficient comparison
+  const currentMap = new Map(current.map(item => [item.id, item]));
+  const incomingMap = new Map(incoming.map(item => [item.id, item]));
+  
+  // Check if any IDs are different
+  if (current.some(item => !incomingMap.has(item.id))) return true;
+  if (incoming.some(item => !currentMap.has(item.id))) return true;
+  
+  // Compare updatedAt timestamps for changed items
+  for (const incomingItem of incoming) {
+    const currentItem = currentMap.get(incomingItem.id);
+    if (currentItem && incomingItem.updatedAt && currentItem.updatedAt !== incomingItem.updatedAt) {
+      return true;
+    }
+  }
+  
+  return false;
+};
+
 export interface TaskAttachment {
   id: string;
   name: string;
@@ -134,6 +164,7 @@ interface AppContextType {
   customColumns: CustomColumn[];
   categories: Category[];
   isLoading: boolean;
+  isInitialLoad: boolean;
   isRealtimeConnected: boolean;
   fetchTasks: () => Promise<void>;
   fetchProjects: () => Promise<void>;
@@ -181,6 +212,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   const [customColumns, setCustomColumns] = React.useState<CustomColumn[]>([]);
   const [categories, setCategories] = React.useState<Category[]>([]);
   const [isLoading, setIsLoading] = React.useState(false);
+  const [isInitialLoad, setIsInitialLoad] = React.useState(true);
   const [isRealtimeConnected, setIsRealtimeConnected] = React.useState(false);
 
   const fetchTasks = React.useCallback(async () => {
@@ -193,7 +225,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
       
       const fetchedTasks = await tasksAPI.getAll();
-      console.log('✅ Задачи загружены из базы:', fetchedTasks.length);
       
       // Deduplicate tasks by ID to prevent display issues
       const uniqueTasksMap = new Map();
@@ -208,48 +239,26 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         console.warn(`⚠️ Дубликаты задач удалены: ${fetchedTasks.length} -> ${uniqueTasks.length}`);
       }
       
-      // Log task distribution by projectId
-      const personalTasks = uniqueTasks.filter(t => !t.projectId);
-      const projectTasks = uniqueTasks.filter(t => t.projectId);
-      const tasksByProject = projectTasks.reduce((acc: any, task) => {
-        acc[task.projectId] = (acc[task.projectId] || 0) + 1;
-        return acc;
-      }, {});
-      
-      console.log('📊 Распределение задач:', {
-        личные: personalTasks.length,
-        проектные: projectTasks.length,
-        поПроектам: tasksByProject,
-      });
-      
-      // Log all tasks with assignee info for debugging member access
-      if (projectTasks.length > 0) {
-        console.log('📋 Все проектные задачи с исполнителями:', projectTasks.map(t => ({
-          id: t.id,
-          title: t.title,
-          projectId: t.projectId,
-          assigneeId: t.assigneeId,
-          status: t.status,
-        })));
-      }
-      
-      // Log first few tasks for debugging
-      if (uniqueTasks.length > 0) {
-        console.log('📋 Первые 3 задачи:', uniqueTasks.slice(0, 3).map(t => ({
-          id: t.id,
-          title: t.title,
-          projectId: t.projectId,
-          status: t.status,
-        })));
-      }
-      
       // Limit tasks to prevent memory issues
       const limitedTasks = uniqueTasks.slice(0, 1000);
       if (uniqueTasks.length > 1000) {
         console.warn(`⚠️ Показано ${limitedTasks.length} из ${uniqueTasks.length} задач для оптимизации производительности`);
       }
       
-      setTasks(limitedTasks);
+      // Only update state if data actually changed - prevents unnecessary re-renders during drag-and-drop
+      setTasks(prevTasks => {
+        if (!areArraysDifferent(prevTasks, limitedTasks)) {
+          // Data hasn't changed, return previous state to prevent re-render
+          return prevTasks;
+        }
+        console.log('✅ Задачи обновлены:', { 
+          было: prevTasks.length, 
+          стало: limitedTasks.length,
+          личные: limitedTasks.filter(t => !t.projectId).length,
+          проектные: limitedTasks.filter(t => t.projectId).length,
+        });
+        return limitedTasks;
+      });
     } catch (error: any) {
       // Only log if it's not an auth error (auth errors are expected when not logged in)
       if (!error.message?.includes('авторизован') && !error.message?.includes('Not authenticated')) {
@@ -269,7 +278,6 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       }
       
       const fetchedProjects = await projectsAPI.getAll();
-      console.log('✅ Проекты загружены из базы:', fetchedProjects.length);
       
       // Filter out archived projects (they should be loaded separately)
       const activeProjects = fetchedProjects.filter(p => !p.archived);
@@ -280,7 +288,15 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         console.warn(`⚠️ Показано ${limitedProjects.length} из ${activeProjects.length} проектов для оптимизации производительности`);
       }
       
-      setProjects(limitedProjects);
+      // Only update state if data actually changed - prevents unnecessary re-renders
+      setProjects(prevProjects => {
+        if (!areArraysDifferent(prevProjects, limitedProjects)) {
+          // Data hasn't changed, return previous state to prevent re-render
+          return prevProjects;
+        }
+        console.log('✅ Проекты обновлены:', { было: prevProjects.length, стало: limitedProjects.length });
+        return limitedProjects;
+      });
     } catch (error: any) {
       // Only log if it's not an auth error (auth errors are expected when not logged in)
       if (!error.message?.includes('авторизован') && !error.message?.includes('Not authenticated')) {
@@ -691,6 +707,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         }
         if (isMounted) {
           setIsLoading(false);
+          setIsInitialLoad(false); // Mark initial load as complete
         }
       }
     };
@@ -728,7 +745,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     // Use polling instead of realtime for KV store compatibility
     const intervalId = setInterval(async () => {
       try {
-        // Обновляем данные каждые 3 секунды используя существующие API функции
+        // Обновляем данные каждые 5 секунд используя существующие API функции
         await Promise.all([
           fetchTasks(),
           fetchProjects(),
@@ -742,9 +759,9 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
         console.error('Polling error:', error);
         setIsRealtimeConnected(false);
       }
-    }, 3000); // Обновление каждые 3 секунды
+    }, 5000); // Обновление каждые 5 секунд (уменьшено с 3 для снижения нагрузки)
 
-    console.log('✅ Polling включен (обновление каждые 3 секунды)');
+    console.log('✅ Polling включен (обновление каждые 5 секунд)');
     setIsRealtimeConnected(true);
 
     // Cleanup polling on unmount
@@ -1211,6 +1228,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     customColumns,
     categories,
     isLoading,
+    isInitialLoad,
     isRealtimeConnected,
     fetchTasks,
     fetchProjects,

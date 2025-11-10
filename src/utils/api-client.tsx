@@ -243,333 +243,84 @@ export const tasksAPI = {
   getAll: async () => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
-    
-    const userId = getUserIdFromToken();
-    if (!userId) throw new Error('Invalid token');
 
-    // Fetch user's own tasks
-    const response = await fetch(`${API_BASE_URL}/api/kv/tasks:${userId}`, {
+    // Use new Prisma-based endpoint
+    const response = await fetch(`${API_BASE_URL}/api/tasks`, {
       headers: {
         'Authorization': `Bearer ${token}`,
       },
     });
 
     if (!response.ok) {
-      throw new Error('Failed to fetch tasks');
+      const errorData = await response.json().catch(() => ({ error: 'Failed to fetch tasks' }));
+      throw new Error(errorData.error || 'Failed to fetch tasks');
     }
 
-    const data = await response.json();
-    let allTasks = data.value || [];
-    
-    // Fetch tasks from shared projects
-    try {
-      const sharedProjectsResponse = await fetch(`${API_BASE_URL}/api/kv/shared_projects:${userId}`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-        },
-      });
-      
-      if (sharedProjectsResponse.ok) {
-        const sharedProjectsData = await sharedProjectsResponse.json();
-        const sharedProjects = sharedProjectsData.value || [];
-        
-        // For each shared project, fetch tasks from the project owner
-        for (const projectRef of sharedProjects) {
-          try {
-            const ownerTasksResponse = await fetch(`${API_BASE_URL}/api/kv/tasks:${projectRef.ownerId}`, {
-              headers: {
-                'Authorization': `Bearer ${token}`,
-              },
-            });
-            
-            if (ownerTasksResponse.ok) {
-              const ownerTasksData = await ownerTasksResponse.json();
-              const ownerTasks = ownerTasksData.value || [];
-              
-              // Filter tasks that belong to the shared project
-              const projectTasks = ownerTasks.filter((task: any) => task.projectId === projectRef.projectId);
-              
-              // Add project tasks to allTasks (avoid duplicates)
-              projectTasks.forEach((task: any) => {
-                if (!allTasks.find((t: any) => t.id === task.id)) {
-                  allTasks.push(task);
-                }
-              });
-            }
-          } catch (error) {
-            console.error(`Failed to fetch tasks from project owner ${projectRef.ownerId}:`, error);
-          }
-        }
-      }
-    } catch (error) {
-      console.error('Failed to fetch shared project tasks:', error);
-    }
-    
-    // Load attachments for each task
-    const tasksWithAttachments = await Promise.all(
-      allTasks.map(async (task: any) => {
-        try {
-          const attachmentsResponse = await fetch(`${API_BASE_URL}/api/kv/task_attachments:${task.id}`, {
-            headers: {
-              'Authorization': `Bearer ${token}`,
-            },
-          });
-          
-          if (attachmentsResponse.ok) {
-            const attachmentsData = await attachmentsResponse.json();
-            const attachments = attachmentsData.value || [];
-            return { ...task, attachments };
-          }
-        } catch (error) {
-          console.error(`Failed to load attachments for task ${task.id}:`, error);
-        }
-        
-        return task;
-      })
-    );
-    
-    return tasksWithAttachments;
+    const tasks = await response.json();
+    return tasks;
   },
 
   create: async (taskData: any) => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
-    
-    const userId = getUserIdFromToken();
-    if (!userId) throw new Error('Invalid token');
 
-    // Create new task
-    const newTask = {
-      ...taskData,
-      id: taskData.id || `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      userId: taskData.userId || userId, // Set creator
-      orderKey: taskData.orderKey || 'n', // Начальное значение orderKey
-      version: 1, // Начальная версия
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    
-    // Determine which user's task list to add to
-    let targetUserId = userId;
-    
-    // If task has a projectId, check if it's a shared project
-    if (newTask.projectId) {
-      try {
-        const sharedProjectsResponse = await fetch(`${API_BASE_URL}/api/kv/shared_projects:${userId}`, {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-          },
-        });
-        
-        if (sharedProjectsResponse.ok) {
-          const sharedProjectsData = await sharedProjectsResponse.json();
-          const sharedProjects = sharedProjectsData.value || [];
-          const sharedProject = sharedProjects.find((ref: any) => ref.projectId === newTask.projectId);
-          
-          if (sharedProject) {
-            // This is a shared project, add task to owner's list
-            targetUserId = sharedProject.ownerId;
-          }
-        }
-      } catch (error) {
-        console.error('Error checking shared projects:', error);
-      }
-    }
-
-    // Get existing tasks for target user
-    const tasksResponse = await fetch(`${API_BASE_URL}/api/kv/tasks:${targetUserId}`, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-    });
-    
-    let tasks = [];
-    if (tasksResponse.ok) {
-      const tasksData = await tasksResponse.json();
-      tasks = tasksData.value || [];
-    }
-    
-    // Save updated tasks
-    tasks.push(newTask);
-    const saveResponse = await fetch(`${API_BASE_URL}/api/kv/tasks:${targetUserId}`, {
+    // Use new Prisma-based endpoint
+    const response = await fetch(`${API_BASE_URL}/api/tasks`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`,
       },
-      body: JSON.stringify({ value: tasks }),
+      body: JSON.stringify(taskData),
     });
 
-    if (!saveResponse.ok) {
-      const errorData = await saveResponse.json().catch(() => ({ error: 'Failed to save task' }));
-      throw new Error(errorData.error || `Failed to save task: ${saveResponse.status} ${saveResponse.statusText}`);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: 'Failed to create task' }));
+      throw new Error(errorData.error || `Failed to create task: ${response.status} ${response.statusText}`);
     }
 
+    const newTask = await response.json();
     return newTask;
   },
 
   update: async (taskId: string, updates: any) => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
-    
-    const userId = getUserIdFromToken();
-    if (!userId) throw new Error('Invalid token');
 
-    // Get all accessible tasks to find the task
-    const allTasks = await tasksAPI.getAll();
-    const taskToUpdate = allTasks.find((t: any) => t.id === taskId);
-    
-    if (!taskToUpdate) {
-      throw new Error('Task not found');
-    }
-    
-    // Determine which user's task list to update
-    let targetUserId = taskToUpdate.userId || userId;
-    
-    // If task has a projectId, check if it's a shared project
-    if (taskToUpdate.projectId) {
-      try {
-        const sharedProjectsResponse = await fetch(`${API_BASE_URL}/api/kv/shared_projects:${userId}`, {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-          },
-        });
-        
-        if (sharedProjectsResponse.ok) {
-          const sharedProjectsData = await sharedProjectsResponse.json();
-          const sharedProjects = sharedProjectsData.value || [];
-          const sharedProject = sharedProjects.find((ref: any) => ref.projectId === taskToUpdate.projectId);
-          
-          if (sharedProject) {
-            // This is a shared project, update task in owner's list
-            targetUserId = sharedProject.ownerId;
-          }
-        }
-      } catch (error) {
-        console.error('Error checking shared projects:', error);
-      }
-    }
-    
-    // Get tasks for target user
-    const tasksResponse = await fetch(`${API_BASE_URL}/api/kv/tasks:${targetUserId}`, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-      },
-    });
-    
-    if (!tasksResponse.ok) {
-      throw new Error('Failed to fetch tasks');
-    }
-    
-    const tasksData = await tasksResponse.json();
-    const tasks = tasksData.value || [];
-    
-    // Find and update task
-    const index = tasks.findIndex((t: any) => t.id === taskId);
-    if (index === -1) {
-      throw new Error('Task not found in owner list');
-    }
-
-    // Инкрементируем версию при обновлении для оптимистичной конкурентности
-    const currentVersion = tasks[index].version || 1;
-    
-    tasks[index] = {
-      ...tasks[index],
-      ...updates,
-      version: currentVersion + 1, // Инкрементируем версию
-      updatedAt: new Date().toISOString(),
-    };
-
-    // Save updated tasks
-    const saveResponse = await fetch(`${API_BASE_URL}/api/kv/tasks:${targetUserId}`, {
-      method: 'POST',
+    // Use new Prisma-based endpoint
+    const response = await fetch(`${API_BASE_URL}/api/tasks/${taskId}`, {
+      method: 'PATCH',
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${token}`,
       },
-      body: JSON.stringify({ value: tasks }),
+      body: JSON.stringify(updates),
     });
 
-    if (!saveResponse.ok) {
-      const errorData = await saveResponse.json().catch(() => ({ error: 'Failed to update task' }));
-      throw new Error(errorData.error || `Failed to update task: ${saveResponse.status} ${saveResponse.statusText}`);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: 'Failed to update task' }));
+      throw new Error(errorData.error || `Failed to update task: ${response.status} ${response.statusText}`);
     }
 
-    return tasks[index];
+    const updatedTask = await response.json();
+    return updatedTask;
   },
 
   delete: async (taskId: string) => {
     const token = getAuthToken();
     if (!token) throw new Error('Not authenticated');
-    
-    const userId = getUserIdFromToken();
-    if (!userId) throw new Error('Invalid token');
 
-    // Get all accessible tasks to find the task
-    const allTasks = await tasksAPI.getAll();
-    const taskToDelete = allTasks.find((t: any) => t.id === taskId);
-    
-    if (!taskToDelete) {
-      throw new Error('Task not found');
-    }
-    
-    // Determine which user's task list to delete from
-    let targetUserId = taskToDelete.userId || userId;
-    
-    // If task has a projectId, check if it's a shared project
-    if (taskToDelete.projectId) {
-      try {
-        const sharedProjectsResponse = await fetch(`${API_BASE_URL}/api/kv/shared_projects:${userId}`, {
-          headers: {
-            'Authorization': `Bearer ${token}`,
-          },
-        });
-        
-        if (sharedProjectsResponse.ok) {
-          const sharedProjectsData = await sharedProjectsResponse.json();
-          const sharedProjects = sharedProjectsData.value || [];
-          const sharedProject = sharedProjects.find((ref: any) => ref.projectId === taskToDelete.projectId);
-          
-          if (sharedProject) {
-            // This is a shared project, delete task from owner's list
-            targetUserId = sharedProject.ownerId;
-          }
-        }
-      } catch (error) {
-        console.error('Error checking shared projects:', error);
-      }
-    }
-    
-    // Get tasks for target user
-    const tasksResponse = await fetch(`${API_BASE_URL}/api/kv/tasks:${targetUserId}`, {
+    // Use new Prisma-based endpoint
+    const response = await fetch(`${API_BASE_URL}/api/tasks/${taskId}`, {
+      method: 'DELETE',
       headers: {
         'Authorization': `Bearer ${token}`,
       },
     });
-    
-    if (!tasksResponse.ok) {
-      throw new Error('Failed to fetch tasks');
-    }
-    
-    const tasksData = await tasksResponse.json();
-    const tasks = tasksData.value || [];
 
-    // Filter out deleted task
-    const updatedTasks = tasks.filter((t: any) => t.id !== taskId);
-
-    // Save updated tasks
-    const saveResponse = await fetch(`${API_BASE_URL}/api/kv/tasks:${targetUserId}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`,
-      },
-      body: JSON.stringify({ value: updatedTasks }),
-    });
-
-    if (!saveResponse.ok) {
-      const errorData = await saveResponse.json().catch(() => ({ error: 'Failed to delete task' }));
-      throw new Error(errorData.error || `Failed to delete task: ${saveResponse.status} ${saveResponse.statusText}`);
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: 'Failed to delete task' }));
+      throw new Error(errorData.error || `Failed to delete task: ${response.status} ${response.statusText}`);
     }
 
     return true;

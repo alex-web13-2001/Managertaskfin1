@@ -103,7 +103,6 @@ model Task {
   category    String?
   tags        String[]  @default([])
   dueDate     DateTime?
-  attachments Json?     // Array of file attachments
   orderKey    String?   @default("n") // Лексикографический ключ для сортировки (Base36)
   version     Int       @default(1) // Монотонный счетчик для оптимистичной конкурентности
   createdAt   DateTime  @default(now())
@@ -116,12 +115,30 @@ model Task {
   creator     User      @relation("TaskCreator", fields: [creatorId], references: [id], onDelete: Cascade)
   assigneeId  String?
   assignee    User?     @relation("TaskAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  attachments Attachment[] // Связь с вложениями через отдельную таблицу
 
   @@index([projectId])
   @@index([creatorId])
   @@index([assigneeId])
   @@index([status, orderKey]) // Индекс для быстрой сортировки по колонкам
   @@map("tasks")
+}
+
+// Attachment model - stores file attachments for tasks
+model Attachment {
+  id        String   @id @default(uuid())
+  name      String   // Имя файла для отображения
+  url       String   // Путь к файлу на сервере
+  size      Int      // Размер в байтах
+  mimeType  String   // MIME тип файла
+  createdAt DateTime @default(now())
+
+  // Связь с задачей (удаляется каскадно при удалении задачи)
+  taskId    String
+  task      Task     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+  @@map("attachments")
 }
 
 // KvStore model - simple key-value store for application data

@@ -129,16 +129,15 @@ const DraggableTaskCard = React.forwardRef<HTMLDivElement, {
       <motion.div
         id={`task-card-${task.id}`}
         ref={combinedRef}
-        layout
         layoutId={task.id}
-        initial={isInitialRender ? { opacity: 1 } : { opacity: 0 }}
+        initial={{ opacity: 1 }}
         animate={{ 
-          opacity: isDragging ? 0.4 : 1,
+          opacity: isDragging ? 0.5 : 1,
         }}
-        exit={{ opacity: 0 }}
+        exit={{ opacity: 0, scale: 0.9 }}
         transition={{ 
-          duration: 0.05,
-          ease: 'easeOut',
+          opacity: { duration: 0.05 },
+          scale: { duration: 0.1 },
           layout: { duration: 0.15, ease: 'easeOut' }
         }}
         className="cursor-move"
@@ -296,7 +295,7 @@ const DroppableColumn = ({
         }}
         transition={{ duration: 0.15 }}
       >
-        <AnimatePresence mode="sync">
+        <AnimatePresence mode="popLayout">
           {tasks.map((task, index) => (
             <DraggableTaskCard
               key={task.id}

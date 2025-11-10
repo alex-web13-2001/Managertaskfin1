@@ -154,16 +154,16 @@ const DraggableTaskCard = React.forwardRef<HTMLDivElement, {
       <motion.div
         id={`task-card-${task.id}`}
         ref={combinedRef}
-        layout
-        initial={{ opacity: 0 }}
+        layoutId={task.id}
+        initial={{ opacity: 1 }}
         animate={{ 
-          opacity: isDragging ? 0.4 : 1,
+          opacity: isDragging ? 0.5 : 1,
         }}
-        exit={{ opacity: 0 }}
+        exit={{ opacity: 0, scale: 0.9 }}
         transition={{ 
-          duration: 0.1,
-          ease: 'linear',
-          layout: { duration: 0.2 }
+          opacity: { duration: 0.05 },
+          scale: { duration: 0.1 },
+          layout: { duration: 0.15, ease: 'easeOut' }
         }}
         className="cursor-move"
       >
@@ -398,14 +398,15 @@ const DroppableColumn = ({
         </Badge>
       </div>
 
-      <div
+      <motion.div
+        layout="position"
         className={`flex-1 space-y-3 overflow-y-auto p-3 rounded-lg transition-colors duration-150 ${
           isOver && canDrop ? 'bg-purple-50 ring-2 ring-purple-300' : 
           isOver && !canDrop ? 'bg-red-50 ring-2 ring-red-300' : 
           'bg-transparent'
         }`}
       >
-        <AnimatePresence mode="sync">
+        <AnimatePresence mode="popLayout">
           {tasks.map((task, index) => (
             <DraggableTaskCard
               key={task.id}
@@ -419,7 +420,7 @@ const DroppableColumn = ({
             />
           ))}
         </AnimatePresence>
-      </div>
+      </motion.div>
     </div>
   );
 };
@@ -667,21 +668,11 @@ export function KanbanBoard({
       }
     }
     
-    // If moving between columns, update status first and wait for it
-    if (sourceStatus !== targetStatus) {
-      try {
-        await handleTaskStatusChange(draggedId, targetStatus);
-      } catch (error) {
-        console.error('[KanbanBoard] Failed to update task status');
-        return; // Don't update order if status change failed
-      }
-    }
-    
-    // Update order state after status change completes
+    // Update order state IMMEDIATELY for instant visual feedback
     setTaskOrder(prev => {
       const updated = { ...prev };
       
-      // Get tasks for target column (будет включать перемещенную задачу после обновления статуса)
+      // Get tasks for target column
       const targetColumnTasks = filteredTasks
         .filter(t => t.id === draggedId || t.status === targetStatus)
         .map(t => t.id);
@@ -716,6 +707,14 @@ export function KanbanBoard({
       console.log('[KanbanBoard] Updated taskOrder (deduplicated):', updated);
       return updated;
     });
+    
+    // If moving between columns, update status asynchronously (but don't await to avoid blocking UI)
+    if (sourceStatus !== targetStatus) {
+      handleTaskStatusChange(draggedId, targetStatus).catch(error => {
+        console.error('[KanbanBoard] Failed to update task status:', error);
+        // Optionally revert the taskOrder change here if status update fails
+      });
+    }
   };
 
   return (

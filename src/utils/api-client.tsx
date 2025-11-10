@@ -658,6 +658,9 @@ export const projectsAPI = {
     const userId = getUserIdFromToken();
     if (!userId) throw new Error('Invalid token');
 
+    // Get current user info to add as owner member
+    const currentUser = await authAPI.getCurrentUser();
+
     // Fetch only owned projects, not shared projects
     const ownedProjectsResponse = await fetch(`${API_BASE_URL}/api/kv/projects:${userId}`, {
       headers: {
@@ -677,6 +680,19 @@ export const projectsAPI = {
       userId: userId, // Set the owner's userId
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
+      // Initialize members array with owner
+      members: [
+        {
+          id: userId,
+          userId: userId,
+          name: currentUser?.name || currentUser?.email || 'Владелец',
+          email: currentUser?.email || '',
+          role: 'owner',
+          addedDate: new Date().toISOString(),
+        },
+        ...(projectData.members || [])
+      ],
+      invitations: projectData.invitations || [],
     };
 
     projects.push(newProject);

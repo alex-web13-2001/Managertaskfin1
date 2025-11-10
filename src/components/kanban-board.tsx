@@ -12,7 +12,8 @@ import { useApp } from '../contexts/app-context';
 import { format } from 'date-fns';
 import { ru } from 'date-fns/locale';
 import { motion, AnimatePresence } from 'framer-motion';
-import { generateOrderKey, compareOrderKeys } from '../utils/orderKey';
+import { compareOrderKeys } from '../utils/orderKey';
+import { useKanbanDnD } from '../hooks/useKanbanDnD';
 import type { Filters } from './filters-panel';
 import type { Task as TaskType } from '../contexts/app-context';
 
@@ -307,6 +308,21 @@ const DraggableTaskCard = React.forwardRef<HTMLDivElement, {
 
 DraggableTaskCard.displayName = 'DraggableTaskCard';
 
+// Мемоизированная версия для оптимизации производительности
+const MemoizedDraggableTaskCard = React.memo(DraggableTaskCard, (prevProps, nextProps) => {
+  return (
+    prevProps.task.id === nextProps.task.id &&
+    prevProps.task.title === nextProps.task.title &&
+    prevProps.task.status === nextProps.task.status &&
+    prevProps.task.priority === nextProps.task.priority &&
+    prevProps.task.deadline === nextProps.task.deadline &&
+    prevProps.task.updatedAt === nextProps.task.updatedAt &&
+    prevProps.isOverdue === nextProps.isOverdue &&
+    prevProps.index === nextProps.index &&
+    prevProps.isInitialMount === nextProps.isInitialMount
+  );
+});
+
 // Droppable Column Component
 const DroppableColumn = ({
   columnId,
@@ -425,7 +441,7 @@ const DroppableColumn = ({
       >
         <AnimatePresence mode="popLayout">
           {tasks.map((task, index) => (
-            <DraggableTaskCard
+            <MemoizedDraggableTaskCard
               key={task.id}
               task={task}
               index={index}
@@ -443,6 +459,18 @@ const DroppableColumn = ({
   );
 };
 
+// Мемоизированная версия DroppableColumn
+const MemoizedDroppableColumn = React.memo(DroppableColumn, (prevProps, nextProps) => {
+  return (
+    prevProps.columnId === nextProps.columnId &&
+    prevProps.title === nextProps.title &&
+    prevProps.tasks.length === nextProps.tasks.length &&
+    prevProps.tasks.every((task, index) => task.id === nextProps.tasks[index]?.id && task.updatedAt === nextProps.tasks[index]?.updatedAt) &&
+    prevProps.isInitialMount === nextProps.isInitialMount &&
+    prevProps.isCustom === nextProps.isCustom
+  );
+});
+
 type GroupBy = 'none' | 'project' | 'priority';
 
 export function KanbanBoard({
@@ -458,7 +486,6 @@ export function KanbanBoard({
 }) {
   const { tasks, updateTask, customColumns } = useApp();
   const [groupBy, setGroupBy] = React.useState<GroupBy>('none');
-  const [taskOrder, setTaskOrder] = React.useState<Record<string, string[]>>({});
   const [isInitialMount, setIsInitialMount] = React.useState(true);
 
   // Mark as no longer initial mount after first render
@@ -577,35 +604,14 @@ export function KanbanBoard({
     return result;
   }, [tasks, searchQuery, filters]);
 
-  // Clean up taskOrder - remove IDs that don't exist in current filtered tasks
-  // Используем startTransition для низкоприоритетного обновления
-  React.useEffect(() => {
-    const currentTaskIds = new Set(filteredTasks.map(t => t.id));
-    
-    React.startTransition(() => {
-      setTaskOrder(prev => {
-        let needsCleanup = false;
-        const cleanedOrder: Record<string, string[]> = {};
-        
-        Object.entries(prev).forEach(([status, ids]) => {
-          const cleanedIds = ids.filter(id => currentTaskIds.has(id));
-          if (cleanedIds.length !== ids.length) {
-            needsCleanup = true;
-          }
-          if (cleanedIds.length > 0) {
-            cleanedOrder[status] = cleanedIds;
-          }
-        });
-        
-        if (needsCleanup) {
-          console.log('[KanbanBoard] Cleaning up taskOrder, removed stale IDs');
-          return cleanedOrder;
-        }
-        
-        return prev;
-      });
-    });
-  }, [filteredTasks]);
+  // Use custom hook for DnD logic
+  const { taskOrder, handleMoveCard, handleStatusChange } = useKanbanDnD({
+    tasks: filteredTasks,
+    onUpdateTask: updateTask,
+  });
+
+  // Wrap isOverdue in useCallback for memoization
+  const isOverdueMemoized = React.useCallback(isOverdue, []);
 
   // Group tasks by status into columns
   const columns = React.useMemo(() => {
@@ -650,134 +656,14 @@ export function KanbanBoard({
     });
   }, [columnDefinitions, filteredTasks, taskOrder]);
 
-  // Handle task status change
-  const handleTaskStatusChange = async (taskId: string, newStatus: string) => {
-    try {
-      // Используем silent режим для перемещения карточек, чтобы не показывать toast каждый раз
-      await updateTask(taskId, { status: newStatus }, { silent: true });
-    } catch (error) {
-      console.error('Error updating task status:', error);
-    }
-  };
+  // Wrap handlers in useCallback for memoization
+  const handleMoveCardCallback = React.useCallback((draggedId: string, targetId: string, position: 'before' | 'after') => {
+    return handleMoveCard(draggedId, targetId, position, filteredTasks);
+  }, [handleMoveCard, filteredTasks]);
 
-  // Handle moving card within or between columns
-  const handleMoveCard = async (draggedId: string, targetId: string, position: 'before' | 'after') => {
-    const draggedTask = tasks.find(t => t.id === draggedId);
-    const targetTask = tasks.find(t => t.id === targetId);
-    
-    if (!draggedTask || !targetTask) {
-      console.log('[KanbanBoard] Task not found:', { draggedId, targetId });
-      return;
-    }
-
-    const sourceStatus = draggedTask.status;
-    const targetStatus = targetTask.status;
-    
-    console.log('[KanbanBoard] Moving card:', { draggedId, sourceStatus, targetStatus, position });
-    
-    // Проверяем, является ли целевой столбец кастомным
-    const isTargetCustom = !baseColumnDefinitions.find(base => base.id === targetStatus);
-    
-    // Проверка 1: Если целевой столбец кастомный и задача из проекта - запрещаем перемещение
-    if (isTargetCustom && draggedTask.projectId) {
-      console.log('[KanbanBoard] Cannot move project task to custom column');
-      return;
-    }
-    
-    // Проверка 2: Если задача личная и целевой столбец базовый, проверяем доступность статуса
-    if (!draggedTask.projectId && !isTargetCustom) {
-      if (!PERSONAL_TASK_ALLOWED_STATUSES.includes(targetStatus)) {
-        console.log('[KanbanBoard] Cannot move personal task to unavailable status:', targetStatus);
-        return;
-      }
-    }
-    
-    // Получаем все задачи целевого столбца, отсортированные по orderKey
-    const targetColumnTasks = filteredTasks
-      .filter(t => t.status === targetStatus)
-      .sort((a, b) => compareOrderKeys(a.orderKey || 'n', b.orderKey || 'n'));
-    
-    // Находим индекс целевой задачи
-    const targetIndex = targetColumnTasks.findIndex(t => t.id === targetId);
-    
-    // Вычисляем новый orderKey на основе соседей
-    let newOrderKey: string;
-    let beforeTask: TaskType | undefined;
-    let afterTask: TaskType | undefined;
-    
-    if (position === 'before') {
-      // Вставляем перед целевой задачей
-      afterTask = targetTask;
-      beforeTask = targetIndex > 0 ? targetColumnTasks[targetIndex - 1] : undefined;
-    } else {
-      // Вставляем после целевой задачи
-      beforeTask = targetTask;
-      afterTask = targetIndex < targetColumnTasks.length - 1 ? targetColumnTasks[targetIndex + 1] : undefined;
-    }
-    
-    // Генерируем новый orderKey между соседями
-    newOrderKey = generateOrderKey(beforeTask?.orderKey, afterTask?.orderKey);
-    
-    console.log('[KanbanBoard] Generated orderKey:', {
-      newOrderKey,
-      beforeKey: beforeTask?.orderKey,
-      afterKey: afterTask?.orderKey,
-      position
-    });
-    
-    // Оптимистичное обновление: сразу обновляем локальное состояние для мгновенной визуальной обратной связи
-    setTaskOrder(prev => {
-      const updated = { ...prev };
-      
-      // Get tasks for target column
-      const targetColumnTaskIds = targetColumnTasks.map(t => t.id);
-      
-      // Remove ALL instances of dragged task from order (deduplication)
-      let newOrder = targetColumnTaskIds.filter(id => id !== draggedId);
-      
-      // Find target index
-      const targetIdx = newOrder.indexOf(targetId);
-      
-      // Insert at the correct position
-      if (targetIdx !== -1) {
-        const insertIndex = position === 'before' ? targetIdx : targetIdx + 1;
-        newOrder.splice(insertIndex, 0, draggedId);
-      } else {
-        // If target not found, add to end
-        newOrder.push(draggedId);
-      }
-      
-      // Deduplicate the final order array
-      const uniqueOrder = Array.from(new Set(newOrder));
-      updated[targetStatus] = uniqueOrder;
-      
-      // If moving between different statuses, clean up source column
-      if (sourceStatus !== targetStatus && prev[sourceStatus]) {
-        const cleanedSource = Array.from(new Set(prev[sourceStatus].filter(id => id !== draggedId)));
-        updated[sourceStatus] = cleanedSource;
-      }
-      
-      console.log('[KanbanBoard] Updated taskOrder (optimistic, deduplicated):', updated);
-      return updated;
-    });
-    
-    // Обновляем задачу на сервере с новым orderKey и статусом
-    const updates: Partial<TaskType> = {
-      orderKey: newOrderKey,
-    };
-    
-    // Если меняется статус, добавляем его в обновления
-    if (sourceStatus !== targetStatus) {
-      updates.status = targetStatus;
-    }
-    
-    // Отправляем обновление на сервер (не ждем ответа для плавности UI)
-    updateTask(draggedId, updates, { silent: true }).catch(error => {
-      console.error('[KanbanBoard] Failed to update task:', error);
-      // При ошибке можно реализовать откат (revert), но пока оставляем как есть
-      // для минимальных изменений
-    });
-  };
+  const handleTaskClick = React.useCallback((taskId: string) => {
+    onTaskClick(taskId);
+  }, [onTaskClick]);
 
   return (
     <div className="flex-1 flex flex-col bg-gray-50 h-full overflow-hidden">
@@ -802,16 +688,16 @@ export function KanbanBoard({
             const isCustom = !baseColumnDefinitions.find(base => base.id === column.id);
             console.log('[Dashboard] Rendering column:', column.id, column.title, 'isCustom:', isCustom, 'tasks:', column.tasks.length);
             return (
-              <DroppableColumn
+              <MemoizedDroppableColumn
                 key={column.id}
                 columnId={column.id}
                 title={column.title}
                 color={column.color}
                 tasks={column.tasks}
-                onDrop={handleTaskStatusChange}
-                onTaskClick={onTaskClick}
-                isOverdue={isOverdue}
-                moveCardWithinColumn={handleMoveCard}
+                onDrop={handleStatusChange}
+                onTaskClick={handleTaskClick}
+                isOverdue={isOverdueMemoized}
+                moveCardWithinColumn={handleMoveCardCallback}
                 isCustom={isCustom}
                 allTasks={tasks}
                 baseColumnDefinitions={baseColumnDefinitions}

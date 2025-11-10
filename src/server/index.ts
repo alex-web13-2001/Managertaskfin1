@@ -7,7 +7,6 @@ import fs from 'fs';
 import crypto from 'crypto';
 import prisma from '../lib/prisma';
 import { hashPassword, comparePassword, generateToken, verifyToken, JwtPayload } from '../lib/auth';
-import * as kv from './kv_store';
 import emailService from '../lib/email';
 import invitationRoutes from './routes/invitations.js';
 import { 
@@ -462,7 +461,7 @@ app.post('/api/upload-avatar', authenticate, upload.single('avatar'), async (req
 
 /**
  * POST /api/upload-attachment
- * Upload task attachment
+ * Upload task attachment - REFACTORED TO USE PRISMA
  */
 app.post('/api/upload-attachment', authenticate, upload.single('file'), async (req: AuthRequest, res: Response) => {
   try {
@@ -471,30 +470,42 @@ app.post('/api/upload-attachment', authenticate, upload.single('file'), async (r
     }
 
     const { taskId } = req.body;
+    const userId = req.user!.sub;
+
     if (!taskId) {
       return res.status(400).json({ error: 'Task ID is required' });
     }
 
+    // Check if task exists and user has permission to edit it
+    const task = await prisma.task.findUnique({
+      where: { id: taskId },
+    });
+
+    if (!task) {
+      // Clean up uploaded file
+      fs.unlinkSync(req.file.path);
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    const canEdit = await canEditTaskFromDB(userId, taskId);
+    if (!canEdit) {
+      // Clean up uploaded file
+      fs.unlinkSync(req.file.path);
+      return res.status(403).json({ error: 'You do not have permission to add attachments to this task' });
+    }
+
     const fileUrl = `/uploads/${req.file.filename}`;
-    const attachmentId = `attachment_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    // Store attachment metadata in KV store
-    const attachment = {
-      id: attachmentId,
-      taskId,
-      name: req.file.originalname, // Changed from 'filename' to 'name' for UI consistency
-      filename: req.file.originalname, // Keep for backward compatibility
-      url: fileUrl,
-      size: req.file.size,
-      mimeType: req.file.mimetype,
-      uploadedAt: new Date().toISOString(),
-    };
-
-    // Get existing attachments for this task
-    const taskAttachmentsKey = `task_attachments:${taskId}`;
-    const existingAttachments = (await kv.get(taskAttachmentsKey)) || [];
-    existingAttachments.push(attachment);
-    await kv.set(taskAttachmentsKey, existingAttachments);
+    // Create attachment in database using Prisma
+    const attachment = await prisma.attachment.create({
+      data: {
+        taskId,
+        name: req.file.originalname,
+        url: fileUrl,
+        size: req.file.size,
+        mimeType: req.file.mimetype,
+      },
+    });
 
     res.json({
       attachment,
@@ -502,6 +513,10 @@ app.post('/api/upload-attachment', authenticate, upload.single('file'), async (r
     });
   } catch (error: any) {
     console.error('Upload attachment error:', error);
+    // Clean up file if it exists
+    if (req.file && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
     res.status(500).json({ error: 'Failed to upload attachment' });
   }
 });
@@ -543,181 +558,251 @@ app.post('/api/upload-project-attachment', authenticate, upload.single('file'), 
   }
 });
 
-// ========== KV STORE ENDPOINTS ==========
+// ========== TASK CRUD ENDPOINTS (PRISMA-BASED) ==========
 
 /**
- * GET /api/kv/:key
- * Get value by key
+ * GET /api/tasks
+ * Get all tasks accessible to the user (personal + project tasks based on role)
  */
-app.get('/api/kv/:key', authenticate, async (req: AuthRequest, res: Response) => {
+app.get('/api/tasks', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const { key } = req.params;
     const userId = req.user!.sub;
-    let value = await kv.get(key);
-    
-    // Special handling for task retrieval - filter by role
-    if (key.startsWith('tasks:')) {
-      const tasks = value || [];
-      
-      // Filter tasks based on user role for project tasks
-      const filteredTasks = [];
-      for (const task of tasks) {
-        if (!task.projectId) {
-          // Personal tasks - include if user is the creator
-          const creatorId = task.creatorId || task.userId;
-          if (creatorId === userId) {
-            filteredTasks.push(task);
-          }
-        } else {
-          // Project tasks - check role and filter for members
+
+    // Get all tasks where user is creator or assignee
+    const personalTasks = await prisma.task.findMany({
+      where: {
+        OR: [
+          { creatorId: userId },
+          { assigneeId: userId },
+        ],
+      },
+      include: {
+        project: true,
+        creator: {
+          select: { id: true, name: true, email: true, avatarUrl: true },
+        },
+        assignee: {
+          select: { id: true, name: true, email: true, avatarUrl: true },
+        },
+        attachments: true,
+      },
+      orderBy: [
+        { status: 'asc' },
+        { orderKey: 'asc' },
+      ],
+    });
+
+    // Get project memberships
+    const projectMemberships = await prisma.projectMember.findMany({
+      where: { userId },
+      select: { projectId: true, role: true },
+    });
+
+    // Get tasks from projects where user is a member
+    const projectIds = projectMemberships.map((m) => m.projectId);
+    const projectTasks = await prisma.task.findMany({
+      where: {
+        projectId: { in: projectIds },
+      },
+      include: {
+        project: true,
+        creator: {
+          select: { id: true, name: true, email: true, avatarUrl: true },
+        },
+        assignee: {
+          select: { id: true, name: true, email: true, avatarUrl: true },
+        },
+        attachments: true,
+      },
+      orderBy: [
+        { status: 'asc' },
+        { orderKey: 'asc' },
+      ],
+    });
+
+    // Filter project tasks based on role (Member only sees their own)
+    const filteredProjectTasks = await Promise.all(
+      projectTasks.map(async (task) => {
+        if (task.projectId) {
           const role = await getUserRoleInProject(userId, task.projectId);
-          
           if (role === 'member') {
-            // Members only see tasks they created or are assigned to
-            const creatorId = task.creatorId || task.userId;
-            if (creatorId === userId || task.assigneeId === userId) {
-              filteredTasks.push(task);
+            // Member can only see tasks assigned to them or created by them
+            if (task.creatorId === userId || task.assigneeId === userId) {
+              return task;
             }
-          } else if (role) {
-            // Other roles see all project tasks
-            filteredTasks.push(task);
+            return null;
           }
-          // If no role, don't include the task
         }
-      }
-      
-      value = filteredTasks;
-    }
-    
-    res.json({ key, value });
+        return task;
+      })
+    );
+
+    // Combine and deduplicate
+    const allTasks = [...personalTasks, ...filteredProjectTasks.filter(Boolean)];
+    const uniqueTasks = Array.from(
+      new Map(allTasks.map((task) => [task.id, task])).values()
+    );
+
+    res.json(uniqueTasks);
   } catch (error: any) {
-    console.error('KV get error:', error);
-    res.status(500).json({ error: 'Failed to get value' });
+    console.error('Get tasks error:', error);
+    res.status(500).json({ error: 'Failed to fetch tasks' });
   }
 });
 
 /**
- * POST /api/kv/:key
- * Set value by key
+ * POST /api/tasks
+ * Create a new task with permission validation
  */
-app.post('/api/kv/:key', authenticate, async (req: AuthRequest, res: Response) => {
+app.post('/api/tasks', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const { key } = req.params;
-    const { value } = req.body;
     const userId = req.user!.sub;
-    
-    // Special handling for task updates - enforce permissions
-    if (key.startsWith('tasks:')) {
-      const targetUserId = key.split(':')[1];
-      
-      // Get old tasks to check what changed
-      const oldTasks = await kv.get(key) || [];
-      const newTasks = value || [];
-      
-      // Check for deleted tasks
-      for (const oldTask of oldTasks) {
-        const stillExists = newTasks.find((t: any) => t.id === oldTask.id);
-        if (!stillExists && oldTask.projectId) {
-          // Task was deleted - check permission
-          const canDelete = await canDeleteTask(userId, oldTask);
-          if (!canDelete) {
-            return res.status(403).json({ 
-              error: 'Forbidden: You do not have permission to delete this task.' 
-            });
-          }
-        }
-      }
-      
-      // Check for updated tasks
-      for (const newTask of newTasks) {
-        const oldTask = oldTasks.find((t: any) => t.id === newTask.id);
-        
-        // Case 1: New task being created with a projectId
-        if (!oldTask && newTask.projectId) {
-          const canCreate = await canCreateTaskFromDB(userId, newTask.projectId, newTask.assigneeId);
-          if (!canCreate) {
-            return res.status(403).json({ 
-              error: 'Forbidden: You do not have permission to create tasks in this project.' 
-            });
-          }
-        }
-        
-        // Case 2: Existing task - check if projectId changed or task updated
-        if (oldTask) {
-          // Case 2a: Task moved from personal to project (projectId changed from null/undefined to a value)
-          if (!oldTask.projectId && newTask.projectId) {
-            const canCreate = await canCreateTaskFromDB(userId, newTask.projectId, newTask.assigneeId);
-            if (!canCreate) {
-              return res.status(403).json({ 
-                error: 'Forbidden: You do not have permission to add tasks to this project.' 
-              });
-            }
-          }
-          // Case 2b: Task moved between projects (projectId changed from one project to another)
-          else if (oldTask.projectId && newTask.projectId && oldTask.projectId !== newTask.projectId) {
-            // Need permission to create in new project
-            const canCreate = await canCreateTaskFromDB(userId, newTask.projectId, newTask.assigneeId);
-            if (!canCreate) {
-              return res.status(403).json({ 
-                error: 'Forbidden: You do not have permission to add tasks to this project.' 
-              });
-            }
-          }
-          // Case 2c: Task updated within same project
-          else if (newTask.projectId) {
-            // Check if any fields changed
-            const hasChanges = JSON.stringify(oldTask) !== JSON.stringify(newTask);
-            if (hasChanges) {
-              const canEdit = await canEditTask(userId, newTask);
-              if (!canEdit) {
-                return res.status(403).json({ 
-                  error: 'Forbidden: You do not have permission to edit this task.' 
-                });
-              }
-            }
-          }
-        }
-      }
+    const { title, description, status, priority, category, tags, dueDate, projectId, assigneeId, orderKey } = req.body;
+
+    if (!title) {
+      return res.status(400).json({ error: 'Title is required' });
     }
-    
-    await kv.set(key, value);
-    
-    res.json({ key, value, message: 'Value set successfully' });
+
+    // Check permissions
+    const canCreate = await canCreateTaskFromDB(userId, projectId || null, assigneeId);
+    if (!canCreate) {
+      return res.status(403).json({ 
+        error: 'You do not have permission to create this task. Members can only create tasks assigned to themselves.' 
+      });
+    }
+
+    // Create task in database
+    const task = await prisma.task.create({
+      data: {
+        title,
+        description: description || null,
+        status: status || 'todo',
+        priority: priority || 'medium',
+        category: category || null,
+        tags: tags || [],
+        dueDate: dueDate ? new Date(dueDate) : null,
+        projectId: projectId || null,
+        creatorId: userId,
+        assigneeId: assigneeId || null,
+        orderKey: orderKey || 'n',
+      },
+      include: {
+        project: true,
+        creator: {
+          select: { id: true, name: true, email: true, avatarUrl: true },
+        },
+        assignee: {
+          select: { id: true, name: true, email: true, avatarUrl: true },
+        },
+        attachments: true,
+      },
+    });
+
+    res.status(201).json(task);
   } catch (error: any) {
-    console.error('KV set error:', error);
-    res.status(500).json({ error: 'Failed to set value' });
+    console.error('Create task error:', error);
+    res.status(500).json({ error: 'Failed to create task' });
   }
 });
 
 /**
- * DELETE /api/kv/:key
- * Delete value by key
+ * PATCH /api/tasks/:id
+ * Update a task with permission validation
  */
-app.delete('/api/kv/:key', authenticate, async (req: Request, res: Response) => {
+app.patch('/api/tasks/:id', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const { key } = req.params;
-    await kv.del(key);
+    const userId = req.user!.sub;
+    const taskId = req.params.id;
+
+    // Check if task exists
+    const existingTask = await prisma.task.findUnique({
+      where: { id: taskId },
+    });
+
+    if (!existingTask) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    // Check edit permission
+    const canEdit = await canEditTaskFromDB(userId, taskId);
+    if (!canEdit) {
+      return res.status(403).json({ 
+        error: 'You do not have permission to edit this task.' 
+      });
+    }
+
+    // Update task
+    const { title, description, status, priority, category, tags, dueDate, assigneeId, orderKey, version } = req.body;
     
-    res.json({ message: 'Value deleted successfully' });
+    const updateData: any = {};
+    if (title !== undefined) updateData.title = title;
+    if (description !== undefined) updateData.description = description;
+    if (status !== undefined) updateData.status = status;
+    if (priority !== undefined) updateData.priority = priority;
+    if (category !== undefined) updateData.category = category;
+    if (tags !== undefined) updateData.tags = tags;
+    if (dueDate !== undefined) updateData.dueDate = dueDate ? new Date(dueDate) : null;
+    if (assigneeId !== undefined) updateData.assigneeId = assigneeId;
+    if (orderKey !== undefined) updateData.orderKey = orderKey;
+    if (version !== undefined) updateData.version = version;
+
+    const updatedTask = await prisma.task.update({
+      where: { id: taskId },
+      data: updateData,
+      include: {
+        project: true,
+        creator: {
+          select: { id: true, name: true, email: true, avatarUrl: true },
+        },
+        assignee: {
+          select: { id: true, name: true, email: true, avatarUrl: true },
+        },
+        attachments: true,
+      },
+    });
+
+    res.json(updatedTask);
   } catch (error: any) {
-    console.error('KV delete error:', error);
-    res.status(500).json({ error: 'Failed to delete value' });
+    console.error('Update task error:', error);
+    res.status(500).json({ error: 'Failed to update task' });
   }
 });
 
 /**
- * GET /api/kv-prefix/:prefix
- * Get all values with keys starting with prefix
+ * DELETE /api/tasks/:id
+ * Delete a task with permission validation
  */
-app.get('/api/kv-prefix/:prefix', authenticate, async (req: Request, res: Response) => {
+app.delete('/api/tasks/:id', authenticate, async (req: AuthRequest, res: Response) => {
   try {
-    const { prefix } = req.params;
-    const values = await kv.getByPrefix(prefix);
-    
-    res.json({ prefix, values });
+    const userId = req.user!.sub;
+    const taskId = req.params.id;
+
+    // Check if task exists
+    const existingTask = await prisma.task.findUnique({
+      where: { id: taskId },
+    });
+
+    if (!existingTask) {
+      return res.status(404).json({ error: 'Task not found' });
+    }
+
+    // Check delete permission
+    const canDelete = await canDeleteTaskFromDB(userId, taskId);
+    if (!canDelete) {
+      return res.status(403).json({ 
+        error: 'You do not have permission to delete this task. Only Owner and Collaborator can delete tasks.' 
+      });
+    }
+
+    // Delete task (attachments will be cascade deleted)
+    await prisma.task.delete({
+      where: { id: taskId },
+    });
+
+    res.json({ message: 'Task deleted successfully' });
   } catch (error: any) {
-    console.error('KV get by prefix error:', error);
-    res.status(500).json({ error: 'Failed to get values' });
+    console.error('Delete task error:', error);
+    res.status(500).json({ error: 'Failed to delete task' });
   }
 });
 
@@ -763,17 +848,21 @@ app.post('/api/invitations/send-email', authenticate, async (req: AuthRequest, r
 
 /**
  * GET /api/invitations/:invitationId
- * Get invitation details by ID (for invite page)
+ * Get invitation details by ID (for invite page) - REFACTORED TO USE PRISMA
  */
 app.get('/api/invitations/:invitationId', async (req: Request, res: Response) => {
   try {
     const { invitationId } = req.params;
     
-    // Get all pending invitations
-    const allInvitations = await kv.get('pending_invitations') || [];
-    
-    // Find the specific invitation
-    const invitation = allInvitations.find((inv: any) => inv.id === invitationId);
+    // Get invitation from database
+    const invitation = await prisma.invitation.findUnique({
+      where: { id: invitationId },
+      include: {
+        project: {
+          select: { name: true, id: true },
+        },
+      },
+    });
     
     if (!invitation) {
       return res.status(404).json({ error: 'Invitation not found' });
@@ -790,22 +879,10 @@ app.get('/api/invitations/:invitationId', async (req: Request, res: Response) =>
       return res.status(400).json({ error: `Invitation is ${invitation.status}`, invitation });
     }
     
-    // Get project name
-    let projectName = 'Unknown Project';
-    try {
-      const ownerProjects = await kv.get(`projects:${invitation.projectOwnerId}`) || [];
-      const project = ownerProjects.find((p: any) => p.id === invitation.projectId);
-      if (project) {
-        projectName = project.name;
-      }
-    } catch (error) {
-      console.error('Failed to fetch project name:', error);
-    }
-    
     res.json({
       invitation: {
         ...invitation,
-        projectName,
+        projectName: invitation.project.name,
       },
     });
   } catch (error: any) {
@@ -818,7 +895,7 @@ app.get('/api/invitations/:invitationId', async (req: Request, res: Response) =>
 
 /**
  * POST /api/tasks/validate-permission
- * Validate if user has permission to perform action on task
+ * Validate if user has permission to perform action on task - REFACTORED TO USE PRISMA
  */
 app.post('/api/tasks/validate-permission', authenticate, async (req: AuthRequest, res: Response) => {
   try {
@@ -829,21 +906,20 @@ app.post('/api/tasks/validate-permission', authenticate, async (req: AuthRequest
       return res.status(400).json({ error: 'Task ID and action are required' });
     }
     
-    // Get task from KV store
-    const tasks = await kv.get(`tasks:${userId}`) || [];
-    let task = tasks.find((t: any) => t.id === taskId);
-    
-    // If not in user's tasks, check shared projects
-    if (!task) {
-      const sharedProjects = await kv.get(`shared_projects:${userId}`) || [];
-      
-      for (const ref of sharedProjects) {
-        // Get tasks from project owner
-        const ownerTasks = await kv.get(`tasks:${ref.ownerId}`) || [];
-        task = ownerTasks.find((t: any) => t.id === taskId && t.projectId === ref.projectId);
-        if (task) break;
-      }
-    }
+    // Get task from database
+    const task = await prisma.task.findUnique({
+      where: { id: taskId },
+      include: {
+        project: true,
+        creator: {
+          select: { id: true, name: true, email: true },
+        },
+        assignee: {
+          select: { id: true, name: true, email: true },
+        },
+        attachments: true,
+      },
+    });
     
     if (!task) {
       return res.status(404).json({ error: 'Task not found', hasPermission: false });
@@ -853,13 +929,13 @@ app.post('/api/tasks/validate-permission', authenticate, async (req: AuthRequest
     
     switch (action) {
       case 'view':
-        hasPermission = await canViewTask(userId, task);
+        hasPermission = await canViewTaskFromDB(userId, taskId);
         break;
       case 'edit':
-        hasPermission = await canEditTask(userId, task);
+        hasPermission = await canEditTaskFromDB(userId, taskId);
         break;
       case 'delete':
-        hasPermission = await canDeleteTask(userId, task);
+        hasPermission = await canDeleteTaskFromDB(userId, taskId);
         break;
       default:
         return res.status(400).json({ error: 'Invalid action' });
@@ -879,7 +955,7 @@ app.post('/api/tasks/validate-permission', authenticate, async (req: AuthRequest
 
 /**
  * POST /api/tasks/check-permissions
- * Batch check permissions for multiple tasks
+ * Batch check permissions for multiple tasks - REFACTORED TO USE PRISMA
  */
 app.post('/api/tasks/check-permissions', authenticate, async (req: AuthRequest, res: Response) => {
   try {
@@ -892,25 +968,16 @@ app.post('/api/tasks/check-permissions', authenticate, async (req: AuthRequest, 
     
     const results: Record<string, boolean> = {};
     
-    // Get user's tasks
-    const userTasks = await kv.get(`tasks:${userId}`) || [];
-    
-    // Get shared project tasks
-    const sharedProjects = await kv.get(`shared_projects:${userId}`) || [];
-    let sharedTasks: any[] = [];
-    
-    for (const ref of sharedProjects) {
-      const ownerTasks = await kv.get(`tasks:${ref.ownerId}`) || [];
-      sharedTasks = sharedTasks.concat(
-        ownerTasks.filter((t: any) => t.projectId === ref.projectId)
-      );
-    }
-    
-    const allAccessibleTasks = [...userTasks, ...sharedTasks];
+    // Get all tasks from database
+    const tasks = await prisma.task.findMany({
+      where: {
+        id: { in: taskIds },
+      },
+    });
     
     // Check permission for each task
     for (const taskId of taskIds) {
-      const task = allAccessibleTasks.find((t: any) => t.id === taskId);
+      const task = tasks.find((t) => t.id === taskId);
       
       if (!task) {
         results[taskId] = false;
@@ -921,13 +988,13 @@ app.post('/api/tasks/check-permissions', authenticate, async (req: AuthRequest, 
       
       switch (action) {
         case 'view':
-          hasPermission = await canViewTask(userId, task);
+          hasPermission = await canViewTaskFromDB(userId, taskId);
           break;
         case 'edit':
-          hasPermission = await canEditTask(userId, task);
+          hasPermission = await canEditTaskFromDB(userId, taskId);
           break;
         case 'delete':
-          hasPermission = await canDeleteTask(userId, task);
+          hasPermission = await canDeleteTaskFromDB(userId, taskId);
           break;
       }
       

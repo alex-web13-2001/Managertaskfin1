@@ -1297,19 +1297,20 @@ app.post('/api/invitations/send-email', authenticate, async (req: AuthRequest, r
 });
 
 /**
- * GET /api/invitations/:invitationId
- * Get invitation details by ID (for invite page) - REFACTORED TO USE PRISMA
+ * GET /api/invitations/:token
+ * Get invitation details by token (for invite page) - REFACTORED TO USE PRISMA
+ * Note: This endpoint is public (no authentication) since users need to view invitations before logging in
  */
-app.get('/api/invitations/:invitationId', async (req: Request, res: Response) => {
+app.get('/api/invitations/:token', async (req: Request, res: Response) => {
   try {
-    const { invitationId } = req.params;
+    const { token } = req.params;
     
-    // Get invitation from database
+    // Get invitation from database by token
     const invitation = await prisma.invitation.findUnique({
-      where: { id: invitationId },
+      where: { token: token },
       include: {
         project: {
-          select: { name: true, id: true },
+          select: { name: true, id: true, color: true },
         },
       },
     });
@@ -1331,8 +1332,15 @@ app.get('/api/invitations/:invitationId', async (req: Request, res: Response) =>
     
     res.json({
       invitation: {
-        ...invitation,
+        id: invitation.id,
+        token: invitation.token,
+        email: invitation.email,
+        role: invitation.role,
+        status: invitation.status,
+        expiresAt: invitation.expiresAt,
+        projectId: invitation.projectId,
         projectName: invitation.project.name,
+        projectColor: invitation.project.color,
       },
     });
   } catch (error: any) {

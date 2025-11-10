@@ -113,7 +113,8 @@ export function InviteAcceptPage() {
 
     try {
       setIsAccepting(true);
-      await invitationsAPI.acceptInvitation(invitation.id);
+      // Use the token (invitationId) not the database ID
+      await invitationsAPI.acceptInvitation(invitationId);
       
       toast.success('Приглашение принято! Добро пожаловать в проект.');
       
@@ -138,6 +139,9 @@ export function InviteAcceptPage() {
 
     try {
       setIsAccepting(true);
+      // For reject, we need to use the invitation database ID
+      // But for now, we'll skip reject since it requires more work
+      // The reject endpoint expects database ID, not token
       await invitationsAPI.rejectInvitation(invitation.id);
       
       toast.success('Приглашение отклонено');
